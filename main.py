@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """
 Main entry point for S-NAS.
 
@@ -41,8 +40,24 @@ def parse_args():
     
     # Dataset options
     parser.add_argument('--dataset', type=str, default='cifar10',
-                        choices=['cifar10', 'mnist', 'fashion_mnist'],
+                        choices=['cifar10', 'cifar100', 'svhn', 'mnist', 
+                                'kmnist', 'qmnist', 'emnist', 'fashion_mnist'],
                         help='Dataset to use for architecture search')
+    parser.add_argument('--custom-csv-dataset', type=str, default=None,
+                        help='Path to CSV file for custom dataset')
+    parser.add_argument('--custom-folder-dataset', type=str, default=None,
+                        help='Path to folder for custom image dataset')
+    parser.add_argument('--custom-dataset-name', type=str, default='custom_dataset',
+                        help='Name for the custom dataset')
+    parser.add_argument('--image-size', type=str, default='32x32',
+                        choices=['32x32', '64x64', '224x224'],
+                        help='Image size for custom dataset')
+    
+    # Network type options
+    parser.add_argument('--network-type', type=str, default=None,
+                        choices=['all', 'cnn', 'mlp', 'resnet', 'mobilenet'],
+                        help='Type of neural network architecture to search ('
+                             'all=search all types, None=use network_type in architecture file)')
     
     # Search parameters
     parser.add_argument('--population-size', type=int, default=20,
@@ -59,14 +74,29 @@ def parse_args():
                         help='Maximum epochs per architecture evaluation')
     parser.add_argument('--patience', type=int, default=3,
                         help='Early stopping patience')
+    parser.add_argument('--min-delta', type=float, default=0.001,
+                        help='Minimum change to qualify as improvement for early stopping')
+    parser.add_argument('--monitor', type=str, default='val_acc', choices=['val_acc', 'val_loss'],
+                        help='Metric to monitor for early stopping')
     parser.add_argument('--batch-size', type=int, default=128,
                         help='Batch size for training')
+    parser.add_argument('--num-workers', type=int, default=None,
+                        help='Number of workers for data loading (default: CPU count)')
     parser.add_argument('--fast-mode-gens', type=int, default=2,
                         help='Number of generations to use fast evaluation mode')
     
-    # Hardware options
-    parser.add_argument('--device', type=str, default=None,
-                        help='Device to use (e.g., "cuda:0", "cpu")')
+    # Evaluation options
+    parser.add_argument('--extended-metrics', action='store_true',
+                       help='Compute extended metrics (precision, recall, F1, etc.)')
+    
+    # Export options
+    parser.add_argument('--export-model', action='store_true',
+                       help='Export the best model after search')
+    parser.add_argument('--export-format', type=str, default='torchscript',
+                       choices=['torchscript', 'onnx', 'quantized', 'mobile', 'all'],
+                       help='Format to export the model to')
+    parser.add_argument('--export-dir', type=str, default='output/exported_models',
+                       help='Directory to save exported models')
     parser.add_argument('--gpu-ids', type=str, default=None,
                         help='Comma-separated list of GPU IDs to use (e.g., "0,1,2")')
     parser.add_argument('--num-workers', type=int, default=None,
@@ -108,8 +138,30 @@ def setup_components(args):
     dataset_registry = DatasetRegistry(
         data_dir='./data',
         batch_size=args.batch_size,
-        num_workers=4
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available()
     )
+    
+    # Register custom dataset if provided
+    custom_dataset_used = False
+    if args.custom_csv_dataset:
+        logger.info(f"Registering custom CSV dataset from {args.custom_csv_dataset}")
+        dataset_registry.register_csv_dataset(
+            name=args.custom_dataset_name,
+            csv_file=args.custom_csv_dataset,
+            image_size=args.image_size
+        )
+        args.dataset = args.custom_dataset_name
+        custom_dataset_used = True
+    elif args.custom_folder_dataset:
+        logger.info(f"Registering custom folder dataset from {args.custom_folder_dataset}")
+        dataset_registry.register_folder_dataset(
+            name=args.custom_dataset_name,
+            root_dir=args.custom_folder_dataset,
+            image_size=args.image_size
+        )
+        args.dataset = args.custom_dataset_name
+        custom_dataset_used = True
     
     # Get dataset configuration
     dataset_config = dataset_registry.get_dataset_config(args.dataset)
@@ -137,36 +189,80 @@ def setup_components(args):
         model_builder=model_builder,
         device=device,
         max_epochs=args.max_epochs,
-        patience=args.patience
+        patience=args.patience,
+        min_delta=args.min_delta,
+        monitor=args.monitor,
+        compute_extended_metrics=args.extended_metrics
     )
     
-    # Parse GPU IDs if provided
-    gpu_ids = None
-    if args.gpu_ids:
-        gpu_ids = [int(id) for id in args.gpu_ids.split(',')]
+def export_best_model(architecture, components, results, args):
+    """Export the best model to various formats."""
+    try:
+        from snas.model_exporter import ModelExporter
+    except ImportError:
+        logger.error("model_exporter module not found. Skipping model export.")
+        return None
+        
+    # Create model exporter
+    os.makedirs(args.export_dir, exist_ok=True)
+    exporter = ModelExporter(output_dir=args.export_dir)
     
-    # Set up parallel evaluation if multiple GPUs specified
-    if gpu_ids and len(gpu_ids) > 1:
-        job_distributor = JobDistributor(
-            num_workers=args.num_workers or len(gpu_ids),
-            device_ids=gpu_ids
-        )
-        parallel_evaluator = ParallelEvaluator(
-            evaluator=evaluator,
-            job_distributor=job_distributor
+    # Rebuild the model
+    model = components['model_builder'].build_model(architecture)
+    
+    # Get dataset configuration
+    dataset_config = components['dataset_registry'].get_dataset_config(args.dataset)
+    input_shape = dataset_config['input_shape']
+    
+    # Generate model name
+    network_type = architecture.get('network_type', 'cnn')
+    model_name = f"{network_type}_{args.dataset}_{results['test_acc']:.4f}"
+    
+    # Export based on selected format
+    if args.export_format == 'all':
+        logger.info("Exporting model to all formats")
+        export_paths = exporter.export_all_formats(
+            model, input_shape, architecture, model_name
         )
     else:
-        job_distributor = None
-        parallel_evaluator = None
+        export_paths = {}
+        try:
+            if args.export_format == 'torchscript':
+                path = exporter.export_to_torchscript(model, input_shape, model_name)
+            elif args.export_format == 'onnx':
+                path = exporter.export_to_onnx(model, input_shape, model_name)
+            elif args.export_format == 'quantized':
+                path = exporter.export_quantized_model(model, input_shape, model_name)
+            elif args.export_format == 'mobile':
+                path = exporter.export_model_for_mobile(model, input_shape, model_name)
+            
+            export_paths[args.export_format] = path
+            
+            # Generate and save example code
+            example_code = exporter.generate_example_code(
+                args.export_format, path, input_shape
+            )
+            example_path = os.path.join(args.export_dir, f"{model_name}_{args.export_format}_example.py")
+            with open(example_path, 'w') as f:
+                f.write(example_code)
+                
+            logger.info(f"Model exported to {args.export_format} at: {path}")
+            logger.info(f"Example code saved to: {example_path}")
+            
+        except Exception as e:
+            logger.error(f"Error exporting model to {args.export_format}: {e}")
     
-    return {
-        'dataset_registry': dataset_registry,
-        'architecture_space': architecture_space,
-        'model_builder': model_builder,
-        'evaluator': evaluator,
-        'job_distributor': job_distributor,
-        'parallel_evaluator': parallel_evaluator
-    }
+    # Create and save model report
+    if args.extended_metrics:
+        try:
+            report = components['evaluator'].generate_model_report(
+                model, architecture, results, args.export_dir
+            )
+            logger.info(f"Model report saved to: {report.get('report_path', 'unknown')}")
+        except Exception as e:
+            logger.error(f"Error generating model report: {e}")
+    
+    return export_paths
 
 def run_search(args, components, experiment_name, results_dir, models_dir):
     """Run the neural architecture search process."""
@@ -185,6 +281,24 @@ def run_search(args, components, experiment_name, results_dir, models_dir):
         metric='val_acc',
         save_history=True
     )
+    
+    # Force specific network type if specified
+    if args.network_type == 'all':
+        # Let it search all network types
+        logger.info("Searching all network architecture types")
+    elif args.network_type is not None:
+        logger.info(f"Restricting search to network type: {args.network_type}")
+        # Override the network_type in the sample_random_architecture method
+        original_sample = search.architecture_space.sample_random_architecture
+        
+        # Create wrapped function that forces network_type
+        def sample_with_fixed_type():
+            arch = original_sample()
+            arch['network_type'] = args.network_type
+            return arch
+            
+        # Replace the method
+        search.architecture_space.sample_random_architecture = sample_with_fixed_type
     
     # Initialize population
     logger.info("Initializing population...")
@@ -227,6 +341,26 @@ def run_search(args, components, experiment_name, results_dir, models_dir):
     
     # Save results
     save_results(experiment_name, history, best_architecture, best_fitness, results_dir, models_dir)
+    
+    # Export model if requested
+    if args.export_model:
+        # Perform final evaluation to get complete metrics
+        if args.extended_metrics:
+            logger.info("Performing final evaluation with extended metrics")
+            results = components['evaluator'].evaluate(best_architecture, args.dataset, fast_mode=False)
+        else:
+            results = {
+                'test_acc': best_fitness,
+                'architecture': best_architecture,
+                'dataset': args.dataset
+            }
+            
+        # Export the model
+        logger.info(f"Exporting best model to {args.export_format} format")
+        export_paths = export_best_model(best_architecture, components, results, args)
+        
+        if export_paths:
+            logger.info(f"Model exported successfully to: {', '.join(export_paths.keys())}")
     
     logger.info(f"Search completed! Best fitness: {best_fitness:.4f}")
     return best_architecture, best_fitness, history
@@ -331,7 +465,11 @@ def main():
             print(f"  Dataset: {args.dataset}")
             print(f"  Best validation accuracy: {best_fitness:.4f}")
             print(f"  Architecture depth: {best_architecture['num_layers']} layers")
+            print(f"  Network type: {best_architecture.get('network_type', 'cnn')}")
             print(f"  Results saved as: {experiment_name}")
+            
+            if args.export_model:
+                print(f"  Model exported to: {args.export_dir}")
     
     except KeyboardInterrupt:
         logger.info("Interrupted by user")

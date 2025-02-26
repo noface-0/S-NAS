@@ -76,7 +76,8 @@ ones that perform best on predefined benchmark datasets.
 st.sidebar.header("Configuration")
 
 # Dataset selection
-dataset_options = ["cifar10", "mnist", "fashion_mnist"]
+dataset_options = ["cifar10", "cifar100", "svhn", "mnist", 
+                 "kmnist", "qmnist", "emnist", "fashion_mnist"]
 selected_dataset = st.sidebar.selectbox("Dataset", dataset_options)
 
 # Hardware configuration
@@ -99,15 +100,34 @@ num_generations = st.sidebar.slider("Number of Generations", 5, 50, 10)
 mutation_rate = st.sidebar.slider("Mutation Rate", 0.1, 0.5, 0.2, 0.05)
 fast_mode_gens = st.sidebar.slider("Fast Evaluation Generations", 0, 5, 2)
 
+# Network type selection
+st.sidebar.subheader("Network Architecture")
+network_type_options = ["all", "cnn", "mlp", "resnet", "mobilenet"]
+network_type = st.sidebar.selectbox(
+    "Network Type", 
+    options=network_type_options,
+    index=0, 
+    help="Type of neural network to search for"
+)
+
 # Training parameters
 st.sidebar.subheader("Training Parameters")
 max_epochs = st.sidebar.slider("Max Epochs per Evaluation", 5, 50, 10)
-early_stopping = st.sidebar.slider("Early Stopping", 0, 3, 5)
 batch_size = st.sidebar.select_slider(
     "Batch Size", 
     options=[32, 64, 128, 256, 512], 
     value=128
 )
+
+# Early stopping parameters
+patience = st.sidebar.slider("Early Stopping Patience", 1, 10, 3)
+min_delta = st.sidebar.slider("Min Improvement Delta", 0.0001, 0.01, 0.001, 0.0001)
+monitor = st.sidebar.radio("Monitor Metric", ["val_acc", "val_loss"], index=0)
+
+# Data loading parameters
+import multiprocessing
+cpu_count = multiprocessing.cpu_count()
+num_workers = st.sidebar.slider("Data Loading Workers", 0, max(16, cpu_count), min(4, cpu_count))
 
 # View previous results
 st.sidebar.subheader("Previous Results")
@@ -128,9 +148,9 @@ with tab1:
     st.markdown(f"""
     ### Current Configuration
     - **Dataset**: {selected_dataset}
+    - **Network Type**: {network_type}
     - **Population Size**: {population_size}
     - **Generations**: {num_generations}
-    - **Early Stopping**: {early_stopping}
     - **Hardware**: {"GPU" if use_gpu else "CPU"}
     """)
     
@@ -138,7 +158,11 @@ with tab1:
     if st.button("Start Search"):
         with st.spinner("Initializing components..."):
             # Initialize components
-            dataset_registry = DatasetRegistry(batch_size=batch_size)
+            dataset_registry = DatasetRegistry(
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=use_gpu and torch.cuda.is_available()
+            )
             dataset_config = dataset_registry.get_dataset_config(selected_dataset)
             
             architecture_space = ArchitectureSpace(
@@ -159,7 +183,9 @@ with tab1:
                 model_builder=model_builder,
                 device=device,
                 max_epochs=max_epochs,
-                patience=3
+                patience=patience,
+                min_delta=min_delta,
+                monitor=monitor
             )
             
             # Set up job distributor if using multiple GPUs
@@ -188,6 +214,20 @@ with tab1:
                 metric="val_acc",
                 save_history=True
             )
+            
+            # Force specific network type if not "all"
+            if network_type != "all":
+                # Override the network_type in the sample_random_architecture method
+                original_sample = search.architecture_space.sample_random_architecture
+                
+                # Create wrapped function that forces network_type
+                def sample_with_fixed_type():
+                    arch = original_sample()
+                    arch['network_type'] = network_type
+                    return arch
+                
+                # Replace the method
+                search.architecture_space.sample_random_architecture = sample_with_fixed_type
         
         # Create progress bar
         progress_bar = st.progress(0)
