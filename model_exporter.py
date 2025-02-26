@@ -2,7 +2,10 @@
 Model Exporter for S-NAS
 
 This module provides functionality to export trained models to various formats
-like ONNX and TorchScript for deployment.
+like ONNX, TorchScript, quantized models, and mobile-optimized versions for deployment.
+
+It also provides utilities to generate example code for using the exported models
+and to generate standalone PyTorch code that recreates the model architecture.
 """
 
 import os
@@ -11,6 +14,7 @@ import torch
 import logging
 from typing import Dict, Any, Optional, Tuple, Union
 import time
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +30,7 @@ class ModelExporter:
         """
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
+        logger.info(f"Model exporter initialized with output directory: {output_dir}")
     
     def export_to_torchscript(self, model: torch.nn.Module, 
                             input_shape: Tuple, 
@@ -211,23 +216,36 @@ class ModelExporter:
             if quantization_method == 'dynamic':
                 # Dynamic quantization
                 quantized_model = torch.quantization.quantize_dynamic(
-                    traced_model,
+                    model,
                     {torch.nn.Linear, torch.nn.Conv2d},  # Specify which layers to quantize
                     dtype=torch.qint8
                 )
+                # Save the traced model
+                traced_quantized_model = torch.jit.trace(quantized_model, torch.randn(1, *input_shape))
+                torch.jit.save(traced_quantized_model, output_path)
             elif quantization_method == 'static':
-                # Static quantization requires calibration data
-                # This is a simplified version
-                quantized_model = torch.quantization.quantize_static(
-                    traced_model,
-                    {torch.nn.Linear, torch.nn.Conv2d},
-                    dtype=torch.qint8
-                )
+                # For static quantization, we need a more complex approach with calibration
+                # This is a simplified implementation that might need adjustments
+                # Set up quantization configuration
+                model.qconfig = torch.quantization.get_default_qconfig('fbgemm')
+                
+                # Prepare the model for static quantization
+                torch.quantization.prepare(model, inplace=True)
+                
+                # Calibrate with sample data (ideally this would use real data)
+                num_calibration_batches = 10
+                for _ in range(num_calibration_batches):
+                    dummy_input = torch.randn(1, *input_shape)
+                    model(dummy_input)
+                
+                # Convert to quantized model
+                torch.quantization.convert(model, inplace=True)
+                
+                # Save the model
+                traced_model = torch.jit.trace(model, torch.randn(1, *input_shape))
+                torch.jit.save(traced_model, output_path)
             else:
                 raise ValueError(f"Unsupported quantization method: {quantization_method}")
-            
-            # Save the quantized model
-            torch.jit.save(quantized_model, output_path)
             
             # Create a metadata file
             metadata_path = output_path.replace('.pt', '_metadata.json')
@@ -284,7 +302,7 @@ class ModelExporter:
             optimized_model = torch.utils.mobile_optimizer.optimize_for_mobile(traced_model)
             
             # Save the optimized model
-            optimized_model.save(output_path)
+            optimized_model._save_for_lite_interpreter(output_path)
             
             # Create a metadata file
             metadata_path = output_path.replace('.pt', '_metadata.json')
@@ -477,6 +495,10 @@ probabilities = torch.nn.functional.softmax(output, dim=1)
 predicted_class = torch.argmax(probabilities, dim=1).item()
 print(f"Predicted class: {{predicted_class}}")
 print(f"Probabilities: {{probabilities[0]}}")
+
+# Note: Quantized models typically provide the same outputs as their non-quantized counterparts,
+# but with reduced memory usage and faster inference times, especially on hardware with
+# optimized support for int8 operations.
 """
         return code
     
@@ -504,7 +526,335 @@ predicted_class = torch.argmax(probabilities, dim=1).item()
 print(f"Predicted class: {{predicted_class}}")
 print(f"Probabilities: {{probabilities[0]}}")
 
-# For actual mobile deployment, refer to the PyTorch Mobile documentation:
+# For Android deployment:
+'''
+// In your Android project:
+import org.pytorch.Module;
+import org.pytorch.Tensor;
+import org.pytorch.torchvision.TensorImageUtils;
+
+// Load model
+Module module = Module.load(assetFilePath(this, "model.pt"));
+
+// Run inference
+Tensor inputTensor = TensorImageUtils.imageYUV420CenterCropToFloat32Tensor(
+        image, 224, 224, TensorImageUtils.TORCHVISION_NORM_MEAN_RGB,
+        TensorImageUtils.TORCHVISION_NORM_STD_RGB);
+Tensor outputTensor = module.forward(IValue.from(inputTensor)).toTensor();
+float[] scores = outputTensor.getDataAsFloatArray();
+'''
+
+# For iOS deployment:
+'''
+// In your iOS project:
+import LibTorch
+
+// Load model
+let module = try? TorchModule(fileAtPath: "model.pt")
+
+// Run inference
+let inputTensor = Tensor(shape: [1, {', '.join(map(str, input_shape))}], 
+                          data: /* your input data */)
+let outputTensor = module.forward([inputTensor])[0]
+let scores = outputTensor.data();
+'''
+
+# For more details on deploying to mobile, see:
 # https://pytorch.org/mobile/home/
 """
+        return code
+    
+    def generate_model_code(self, architecture: Dict[str, Any]) -> str:
+        """
+        Generate standalone PyTorch code to re-create the model architecture.
+        
+        Args:
+            architecture: Architecture specification
+            
+        Returns:
+            str: Python code to recreate the model
+        """
+        # Extract architecture parameters
+        network_type = architecture.get('network_type', 'cnn')
+        num_layers = architecture.get('num_layers', 4)
+        input_shape = architecture.get('input_shape', (3, 32, 32))
+        num_classes = architecture.get('num_classes', 10)
+        
+        code = f"""
+# PyTorch implementation of architecture discovered by S-NAS
+# Architecture type: {network_type}
+# Number of layers: {num_layers}
+# Input shape: {input_shape}
+# Number of classes: {num_classes}
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
+"""
+        
+        # Add model class definition based on network type
+        if network_type == 'cnn':
+            code += self._generate_cnn_code(architecture)
+        elif network_type == 'mlp':
+            code += self._generate_mlp_code(architecture)
+        elif network_type == 'resnet':
+            code += self._generate_resnet_code(architecture)
+        elif network_type == 'mobilenet':
+            code += self._generate_mobilenet_code(architecture)
+        else:
+            code += self._generate_cnn_code(architecture)  # Default to CNN
+            
+        # Add code to create an instance and set up optimizer
+        optimizer = architecture.get('optimizer', 'adam')
+        learning_rate = architecture.get('learning_rate', 0.001)
+        
+        # Add code to create an instance and set up optimizer
+        optimizer = architecture.get('optimizer', 'adam')
+        learning_rate = architecture.get('learning_rate', 0.001)
+        
+        code += f"""
+# Create model instance
+model = {network_type.capitalize()}Model(num_classes={num_classes})
+
+# Print model summary
+print(model)
+
+# Example of creating an optimizer
+optimizer = optim.{optimizer.capitalize()}(
+    model.parameters(),
+    lr={learning_rate},
+    weight_decay=1e-4
+)
+
+# Example of using the model
+def train_example(model, optimizer, epochs=5):
+    # Assuming we have a DataLoader called train_loader
+    criterion = nn.CrossEntropyLoss()
+    for epoch in range(epochs):
+        running_loss = 0.0
+        for i, (inputs, labels) in enumerate(train_loader):
+            # Zero the parameter gradients
+            optimizer.zero_grad()
+            
+            # Forward pass
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
+            
+            # Print statistics
+            running_loss += loss.item()
+            if i % 100 == 99:
+                print(f'Epoch: {{epoch + 1}}, Batch: {{i + 1}}, Loss: {{running_loss / 100:.3f}}')
+                running_loss = 0.0
+                
+    print('Finished Training')
+"""
+        
+        return code
+    
+    def _generate_cnn_code(self, architecture: Dict[str, Any]) -> str:
+        """Generate code for CNN model."""
+        num_layers = architecture.get('num_layers', 4)
+        filters = architecture.get('filters', [64] * num_layers)
+        kernel_sizes = architecture.get('kernel_sizes', [3] * num_layers)
+        activations = architecture.get('activations', ['relu'] * num_layers)
+        use_batch_norm = architecture.get('use_batch_norm', False)
+        dropout_rate = architecture.get('dropout_rate', 0.0)
+        use_skip_connections = architecture.get('use_skip_connections', [False] * num_layers)
+        
+        code = """
+class CNNModel(nn.Module):
+    def __init__(self, num_classes=10):
+        super(CNNModel, self).__init__()
+        
+        # Architecture parameters
+"""
+        # Add parameters as class variables
+        code += f"        self.num_layers = {num_layers}\n"
+        code += f"        self.filters = {filters}\n"
+        code += f"        self.kernel_sizes = {kernel_sizes}\n"
+        code += f"        self.activations = {activations}\n"
+        code += f"        self.use_batch_norm = {use_batch_norm}\n"
+        code += f"        self.dropout_rate = {dropout_rate}\n"
+        code += f"        self.use_skip_connections = {use_skip_connections}\n\n"
+        
+        # Convolutional layers
+        code += "        # Convolutional layers\n"
+        code += f"        self.conv_layers = nn.ModuleList()\n"
+        code += f"        in_channels = {architecture.get('input_shape', (3, 32, 32))[0]}  # Input channels from shape\n\n"
+        
+        for i in range(num_layers):
+            code += f"        # Layer {i+1}\n"
+            code += f"        self.conv{i+1} = nn.Conv2d(in_channels={filters[i-1] if i > 0 else architecture.get('input_shape', (3, 32, 32))[0]}, " \
+                  f"out_channels={filters[i]}, kernel_size={kernel_sizes[i]}, padding={kernel_sizes[i]//2})\n"
+                  
+            if use_batch_norm:
+                code += f"        self.bn{i+1} = nn.BatchNorm2d({filters[i]})\n"
+            
+        # Global average pooling and classifier
+        code += "\n        # Global average pooling and classifier\n"
+        code += "        self.global_avg_pool = nn.AdaptiveAvgPool2d(1)\n"
+        code += f"        self.classifier = nn.Linear(in_features={filters[-1]}, out_features=num_classes)\n"
+        
+        # Dropout
+        if dropout_rate > 0:
+            code += f"\n        # Dropout with rate {dropout_rate}\n"
+            code += f"        self.dropout = nn.Dropout(p={dropout_rate})\n"
+        
+        # Forward method
+        code += """
+    def forward(self, x):
+        # Save intermediate outputs for skip connections
+        skip_outputs = []
+        
+"""
+        # Forward for each layer
+        for i in range(num_layers):
+            code += f"        # Layer {i+1} forward\n"
+            
+            # Skip connection
+            if i > 0 and any(use_skip_connections):
+                code += f"        # Check for skip connections\n"
+                code += f"        if {i > 0} and self.use_skip_connections[{i}] and skip_outputs:\n"
+                code += f"            # Look for compatible skip connection\n"
+                code += f"            for skip in reversed(skip_outputs):\n"
+                code += f"                if skip.shape[1] == x.shape[1]:  # Check channel dimensions\n"
+                code += f"                    x = x + skip  # Add skip connection\n"
+                code += f"                    break\n\n"
+            
+            # Convolutional layer
+            code += f"        x = self.conv{i+1}(x)\n"
+            
+            # Batch normalization
+            if use_batch_norm:
+                code += f"        x = self.bn{i+1}(x)\n"
+            
+            # Activation
+            if activations[i] == 'relu':
+                code += f"        x = F.relu(x)\n"
+            elif activations[i] == 'leaky_relu':
+                code += f"        x = F.leaky_relu(x, 0.1)\n"
+            elif activations[i] == 'elu':
+                code += f"        x = F.elu(x)\n"
+            elif activations[i] == 'selu':
+                code += f"        x = F.selu(x)\n"
+            
+            # Save for skip connections
+            if any(use_skip_connections):
+                code += f"        skip_outputs.append(x)  # Save for potential skip connections\n"
+            
+            code += "\n"
+        
+        # Global average pooling, dropout, and classification
+        code += """        # Global average pooling
+        x = self.global_avg_pool(x)
+        x = x.view(x.size(0), -1)  # Flatten
+        
+"""
+        if dropout_rate > 0:
+            code += "        # Apply dropout\n"
+            code += "        x = self.dropout(x)\n\n"
+            
+        code += "        # Classification layer\n"
+        code += "        x = self.classifier(x)\n"
+        code += "        return x\n"
+        
+        return code
+    
+    def _generate_mlp_code(self, architecture: Dict[str, Any]) -> str:
+        """Generate code for MLP model."""
+        num_layers = architecture.get('num_layers', 3)
+        hidden_units = architecture.get('hidden_units', [256, 128, 64])
+        activations = architecture.get('activations', ['relu'] * num_layers)
+        use_batch_norm = architecture.get('use_batch_norm', False)
+        dropout_rate = architecture.get('dropout_rate', 0.0)
+        
+        input_shape = architecture.get('input_shape', (3, 32, 32))
+        # Calculate input size by flattening the input shape
+        input_size = input_shape[0] * input_shape[1] * input_shape[2] if len(input_shape) == 3 else input_shape[0]
+        
+        code = """
+class MLPModel(nn.Module):
+    def __init__(self, num_classes=10):
+        super(MLPModel, self).__init__()
+        
+        # Architecture parameters
+"""
+        # Add parameters as class variables
+        code += f"        self.num_layers = {num_layers}\n"
+        code += f"        self.hidden_units = {hidden_units}\n"
+        code += f"        self.activations = {activations}\n"
+        code += f"        self.use_batch_norm = {use_batch_norm}\n"
+        code += f"        self.dropout_rate = {dropout_rate}\n\n"
+        
+        # Calculate input size
+        code += f"        # Calculate input size from input shape\n"
+        code += f"        self.input_size = {input_size}  # Flattened input size\n\n"
+        
+        # Fully connected layers
+        code += "        # Fully connected layers\n"
+        
+        for i in range(num_layers):
+            code += f"        # Layer {i+1}\n"
+            if i == 0:
+                # First layer takes input_size
+                code += f"        self.fc{i+1} = nn.Linear({input_size}, {hidden_units[i]})\n"
+            else:
+                # Subsequent layers take output from previous layer
+                code += f"        self.fc{i+1} = nn.Linear({hidden_units[i-1]}, {hidden_units[i]})\n"
+                
+            if use_batch_norm:
+                code += f"        self.bn{i+1} = nn.BatchNorm1d({hidden_units[i]})\n"
+        
+        # Output layer
+        code += "\n        # Output classifier layer\n"
+        code += f"        self.classifier = nn.Linear({hidden_units[-1]}, num_classes)\n"
+        
+        # Dropout
+        if dropout_rate > 0:
+            code += f"\n        # Dropout with rate {dropout_rate}\n"
+            code += f"        self.dropout = nn.Dropout(p={dropout_rate})\n"
+        
+        # Forward method
+        code += """
+    def forward(self, x):
+        # Flatten input
+        x = x.view(x.size(0), -1)  # Flatten to (batch_size, input_size)
+        
+"""
+        # Forward for each layer
+        for i in range(num_layers):
+            code += f"        # Layer {i+1}\n"
+            code += f"        x = self.fc{i+1}(x)\n"
+            
+            # Batch normalization
+            if use_batch_norm:
+                code += f"        x = self.bn{i+1}(x)\n"
+            
+            # Activation
+            if activations[i] == 'relu':
+                code += f"        x = F.relu(x)\n"
+            elif activations[i] == 'leaky_relu':
+                code += f"        x = F.leaky_relu(x, 0.1)\n"
+            elif activations[i] == 'elu':
+                code += f"        x = F.elu(x)\n"
+            elif activations[i] == 'selu':
+                code += f"        x = F.selu(x)\n"
+            
+            # Dropout (except for the last layer)
+            if dropout_rate > 0:
+                code += f"        x = self.dropout(x)\n"
+            
+            code += "\n"
+        
+        # Classification layer
+        code += "        # Output layer\n"
+        code += "        x = self.classifier(x)\n"
+        code += "        return x\n"
+        
         return code

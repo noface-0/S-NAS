@@ -99,8 +99,6 @@ def parse_args():
                        help='Directory to save exported models')
     parser.add_argument('--gpu-ids', type=str, default=None,
                         help='Comma-separated list of GPU IDs to use (e.g., "0,1,2")')
-    parser.add_argument('--num-workers', type=int, default=None,
-                        help='Number of worker threads for parallel evaluation')
     
     # Output options
     parser.add_argument('--output-dir', type=str, default='output',
@@ -111,6 +109,10 @@ def parse_args():
     # Evaluation mode
     parser.add_argument('--evaluate', type=str, default=None,
                         help='Path to architecture JSON file for evaluation only (no search)')
+    
+    # Device selection
+    parser.add_argument('--device', type=str, default=None,
+                        help='Device to use for computation (e.g., "cuda:0", "cpu")')
     
     return parser.parse_args()
 
@@ -191,10 +193,39 @@ def setup_components(args):
         max_epochs=args.max_epochs,
         patience=args.patience,
         min_delta=args.min_delta,
-        monitor=args.monitor,
-        compute_extended_metrics=args.extended_metrics
+        monitor=args.monitor
     )
     
+    # Setup GPU IDs if specified
+    if args.gpu_ids:
+        gpu_ids = [int(id.strip()) for id in args.gpu_ids.split(',')]
+    else:
+        gpu_ids = None
+    
+    # Setup job distributor for parallel evaluation if multiple GPUs
+    job_distributor = None
+    parallel_evaluator = None
+    
+    if gpu_ids and len(gpu_ids) > 1:
+        job_distributor = JobDistributor(
+            num_workers=len(gpu_ids),
+            device_ids=gpu_ids
+        )
+        parallel_evaluator = ParallelEvaluator(
+            evaluator=evaluator,
+            job_distributor=job_distributor
+        )
+    
+    # Return all components
+    return {
+        'dataset_registry': dataset_registry,
+        'architecture_space': architecture_space,
+        'model_builder': model_builder,
+        'evaluator': evaluator,
+        'job_distributor': job_distributor,
+        'parallel_evaluator': parallel_evaluator
+    }
+
 def export_best_model(architecture, components, results, args):
     """Export the best model to various formats."""
     try:

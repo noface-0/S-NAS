@@ -205,7 +205,7 @@ class DepthwiseSeparableBlock(nn.Module):
                  width_multiplier=1.0):
         super(DepthwiseSeparableBlock, self).__init__()
         
-        # Apply width multiplier
+        # Apply width multiplier (if not already applied)
         in_channels_adj = max(1, int(in_channels * width_multiplier))
         out_channels_adj = max(1, int(out_channels * width_multiplier))
         
@@ -568,23 +568,26 @@ class MobileNetModel(nn.Module):
         in_channels = out_channels
         
         for i in range(num_layers):
-            out_channels = filters[i]
+            out_channels_raw = filters[i]
+            # Apply width multiplier here
+            out_channels_adj = max(int(out_channels_raw * width_multiplier), 8)
             kernel_size = kernel_sizes[i]
             activation = activations[i]
             
-            # Create depthwise separable block
+            # Create depthwise separable block with pre-adjusted channel counts
+            # and width_multiplier=1.0 to prevent double application
             ds_block = DepthwiseSeparableBlock(
                 in_channels=in_channels,
-                out_channels=out_channels,
+                out_channels=out_channels_adj,
                 kernel_size=kernel_size,
                 activation=activation,
                 use_batch_norm=use_batch_norm,
                 dropout_rate=dropout_rate,
-                width_multiplier=width_multiplier
+                width_multiplier=1.0  # Set to 1.0 to prevent double application
             )
             
             self.ds_blocks.append(ds_block)
-            in_channels = max(int(out_channels * width_multiplier), 8)  # Output becomes input for next layer
+            in_channels = out_channels_adj  # Use already adjusted value for next layer
         
         # Global average pooling
         self.global_avg_pool = nn.AdaptiveAvgPool2d(1)

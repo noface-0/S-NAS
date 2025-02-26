@@ -9,6 +9,7 @@ import random
 import time
 import json
 import logging
+import numpy as np
 from typing import List, Dict, Callable, Any, Optional
 from collections import defaultdict
 
