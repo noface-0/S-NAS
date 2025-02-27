@@ -180,3 +180,13 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - Based on concepts from ENAS, DARTS, and other neural architecture search papers
 - Inspired by evolutionary approaches to hyperparameter optimization
+
+## References
+
+1. Pham, H., Guan, M. Y., Zoph, B., Le, Q. V., & Dean, J. (2018). *Efficient Neural Architecture Search via Parameter Sharing*. Proceedings of the 35th International Conference on Machine Learning, PMLR 80:4095-4104.
+
+2. Zoph, B., & Le, Q. V. (2017). *Neural Architecture Search with Reinforcement Learning*. International Conference on Learning Representations (ICLR). Retrieved from https://arxiv.org/abs/1611.01578
+
+3. Liu, C., Zoph, B., Neumann, M., Shlens, J., Hua, W., Li, L. J., Fei-Fei, L., Yuille, A., Huang, J., & Murphy, K. (2018). *Progressive Neural Architecture Search*. European Conference on Computer Vision (ECCV). Retrieved from https://arxiv.org/abs/1802.03268
+
+4. Zoph, B., & Le, Q. V. (2017). *Learning Transferable Architectures for Scalable Image Recognition*. Berkeley Deep RL Course. Retrieved from https://rll.berkeley.edu/deeprlcoursesp17/docs/quoc_barret.pdf
