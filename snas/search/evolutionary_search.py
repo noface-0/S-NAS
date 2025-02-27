@@ -182,10 +182,21 @@ class EvolutionarySearch:
         """
         child = {}
         
+        # First, check if network types are the same
+        if parent1['network_type'] != parent2['network_type']:
+            # Network types are different - use one parent as the base
+            # and just apply mutation to it rather than trying to combine incompatible architectures
+            return parent1.copy() if random.random() < 0.5 else parent2.copy()
+        
         # For each parameter in the architecture
         for key in parent1.keys():
             # Skip input shape and num_classes, they should stay the same
             if key in ['input_shape', 'num_classes']:
+                child[key] = parent1[key]
+                continue
+                
+            # Only attempt to crossover parameters that exist in both parents
+            if key not in parent2:
                 child[key] = parent1[key]
                 continue
                 
@@ -200,7 +211,12 @@ class EvolutionarySearch:
         
         # Make sure num_layers matches the length of layer lists
         if 'num_layers' in child:
-            list_params = ['filters', 'kernel_sizes', 'activations', 'use_skip_connections']
+            list_params = []
+            if child['network_type'] == 'mlp':
+                list_params = ['hidden_units', 'activations']
+            else:  # cnn, resnet, mobilenet
+                list_params = ['filters', 'kernel_sizes', 'activations', 'use_skip_connections']
+                
             for param in list_params:
                 if param in child:
                     child['num_layers'] = len(child[param])

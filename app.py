@@ -1,5 +1,5 @@
 """
-Streamlit Application for S-NAS
+Streamlit Application for S-NAS - Modified with Lazy Loading
 
 This module provides a Streamlit-based user interface for the S-NAS system.
 """
@@ -14,6 +14,12 @@ import numpy as np
 import torch
 import streamlit as st
 import multiprocessing
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Import S-NAS components
 from snas.data.dataset_registry import DatasetRegistry
@@ -24,7 +30,7 @@ from snas.search.evolutionary_search import EvolutionarySearch
 from snas.utils.job_distributor import JobDistributor, ParallelEvaluator
 from snas.visualization.visualizer import SearchVisualizer
 
-# Constants (these can stay at module level)
+# Constants
 OUTPUT_DIR = "output"
 RESULTS_DIR = os.path.join(OUTPUT_DIR, "results")
 
@@ -32,7 +38,7 @@ RESULTS_DIR = os.path.join(OUTPUT_DIR, "results")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Utility functions
+# ---- Utility functions ----
 def save_search_results(dataset_name, search_history, best_architecture, best_fitness):
     """Save search results to disk."""
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -51,18 +57,70 @@ def save_search_results(dataset_name, search_history, best_architecture, best_fi
 def load_search_results(filename):
     """Load search results from disk."""
     # Load history
-    with open(os.path.join(RESULTS_DIR, f"{filename}_history.pkl"), 'rb') as f:
+    history_path = os.path.join(RESULTS_DIR, f"{filename}_history.pkl")
+    with open(history_path, 'rb') as f:
         history = pickle.load(f)
     
     # Load best architecture
-    with open(os.path.join(RESULTS_DIR, f"{filename}_best.json"), 'r') as f:
+    arch_path = os.path.join(RESULTS_DIR, f"{filename}_best.json")
+    with open(arch_path, 'r') as f:
         best_architecture = json.load(f)
         
     return history, best_architecture
 
+@st.cache_resource
+def get_available_datasets():
+    """Get list of available datasets without loading them."""
+    return [
+        "cifar10", "cifar100", "svhn", "mnist", 
+        "kmnist", "qmnist", "emnist", "fashion_mnist"
+    ]
+
+@st.cache_resource
+def get_network_types():
+    """Get list of available network types."""
+    return ["all", "cnn", "mlp", "resnet", "mobilenet"]
+
+def get_result_files():
+    """Get list of available result files."""
+    return [f.split("_history.pkl")[0] for f in os.listdir(RESULTS_DIR) 
+           if f.endswith("_history.pkl")]
+
+@st.cache_resource
+def initialize_components(dataset_name, batch_size, num_workers, pin_memory, _gpu_ids, device):
+    """Initialize components for a specific dataset."""
+    logger.info(f"Initializing components for dataset: {dataset_name}")
+    
+    # Create dataset registry (but don't load datasets yet)
+    dataset_registry = DatasetRegistry(
+        data_dir='./data',
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
+    
+    # Get dataset configuration
+    dataset_config = dataset_registry.get_dataset_config(dataset_name)
+    
+    # Create architecture space
+    architecture_space = ArchitectureSpace(
+        input_shape=dataset_config["input_shape"],
+        num_classes=dataset_config["num_classes"]
+    )
+    
+    # Create model builder
+    model_builder = ModelBuilder(device=device)
+    
+    return {
+        'dataset_registry': dataset_registry,
+        'architecture_space': architecture_space,
+        'model_builder': model_builder,
+        'dataset_config': dataset_config
+    }
+
 def main():
     """Main function containing all Streamlit UI code."""
-    # Set page configuration - moved into main function
+    # Set page configuration
     st.set_page_config(page_title="S-NAS: Simple Neural Architecture Search", layout="wide")
 
     # App title and introduction
@@ -78,9 +136,8 @@ def main():
     # Sidebar for configuration
     st.sidebar.header("Configuration")
 
-    # Dataset selection
-    dataset_options = ["cifar10", "cifar100", "svhn", "mnist", 
-                     "kmnist", "qmnist", "emnist", "fashion_mnist"]
+    # Dataset selection - use the cached function to avoid loading datasets
+    dataset_options = get_available_datasets()
     selected_dataset = st.sidebar.selectbox("Dataset", dataset_options)
 
     # Hardware configuration
@@ -105,7 +162,7 @@ def main():
 
     # Network type selection
     st.sidebar.subheader("Network Architecture")
-    network_type_options = ["all", "cnn", "mlp", "resnet", "mobilenet"]
+    network_type_options = get_network_types()
     network_type = st.sidebar.selectbox(
         "Network Type", 
         options=network_type_options,
@@ -133,14 +190,19 @@ def main():
 
     # View previous results
     st.sidebar.subheader("Previous Results")
-    result_files = [f.split("_history.pkl")[0] for f in os.listdir(RESULTS_DIR) 
-                   if f.endswith("_history.pkl")]
+    result_files = ["None"] + get_result_files()
     selected_result = st.sidebar.selectbox(
         "Select Previous Result", 
-        options=["None"] + result_files
+        options=result_files
     )
 
-    # Main content area with tabs - moved into main function
+    # Determine device
+    if use_gpu and torch.cuda.is_available() and gpu_ids:
+        device = f"cuda:{gpu_ids[0]}"
+    else:
+        device = "cpu"
+
+    # Main content area with tabs
     tab1, tab2, tab3 = st.tabs(["Search", "Results", "Export"])
 
     # Search tab
@@ -159,30 +221,20 @@ def main():
         # Start search button
         if st.button("Start Search"):
             with st.spinner("Initializing components..."):
-                # Initialize components
-                dataset_registry = DatasetRegistry(
-                    batch_size=batch_size,
-                    num_workers=num_workers,
-                    pin_memory=use_gpu and torch.cuda.is_available()
-                )
-                dataset_config = dataset_registry.get_dataset_config(selected_dataset)
-                
-                architecture_space = ArchitectureSpace(
-                    input_shape=dataset_config["input_shape"],
-                    num_classes=dataset_config["num_classes"]
+                # Initialize components only when needed
+                components = initialize_components(
+                    selected_dataset, 
+                    batch_size, 
+                    num_workers, 
+                    use_gpu and torch.cuda.is_available(),
+                    gpu_ids,
+                    device
                 )
                 
-                # Determine device
-                if use_gpu and torch.cuda.is_available() and gpu_ids:
-                    device = f"cuda:{gpu_ids[0]}"
-                else:
-                    device = "cpu"
-                    
-                model_builder = ModelBuilder(device=device)
-                
+                # Create evaluator
                 evaluator = Evaluator(
-                    dataset_registry=dataset_registry,
-                    model_builder=model_builder,
+                    dataset_registry=components['dataset_registry'],
+                    model_builder=components['model_builder'],
                     device=device,
                     max_epochs=max_epochs,
                     patience=patience,
@@ -205,7 +257,7 @@ def main():
                 
                 # Create evolutionary search
                 search = EvolutionarySearch(
-                    architecture_space=architecture_space,
+                    architecture_space=components['architecture_space'],
                     evaluator=evaluator,
                     dataset_name=selected_dataset,
                     population_size=population_size,
@@ -286,7 +338,7 @@ def main():
             """)
             
             # Create visualizer and show plots
-            visualizer = SearchVisualizer(architecture_space)
+            visualizer = SearchVisualizer(components['architecture_space'])
             
             # Plot search progress
             st.subheader("Search Progress")
@@ -354,15 +406,16 @@ def main():
                 ]
                 
             # Add layer names
-            arch_df.index = [f"Layer {i+1}" for i in range(len(arch_df))]
+            if not arch_df.empty:
+                arch_df.index = [f"Layer {i+1}" for i in range(len(arch_df))]
             
-            # Display the DataFrame
-            st.dataframe(arch_df)
+                # Display the DataFrame
+                st.dataframe(arch_df)
             
             # Global parameters
             st.subheader("Global Parameters")
             global_params = {}
-            for param in ['learning_rate', 'dropout_rate', 'optimizer', 'use_batch_norm']:
+            for param in ['network_type', 'learning_rate', 'dropout_rate', 'optimizer', 'use_batch_norm']:
                 if param in best_architecture:
                     global_params[param] = best_architecture[param]
                     
@@ -402,72 +455,136 @@ class BestModel(nn.Module):
         # Model architecture
         self.num_layers = {best_architecture['num_layers']}
         self.input_shape = {best_architecture['input_shape']}
+        self.network_type = "{best_architecture.get('network_type', 'cnn')}"
         
         # Layers
-        layers = []
-        in_channels = self.input_shape[0]
-"""
+        """
                 
-                # Add convolutional layers
-                for i in range(best_architecture['num_layers']):
-                    filters = best_architecture['filters'][i]
-                    kernel_size = best_architecture['kernel_sizes'][i]
-                    activation = best_architecture['activations'][i]
+                # Generate code based on network type
+                network_type = best_architecture.get('network_type', 'cnn')
+                
+                if network_type == 'mlp':
+                    # MLP architecture
+                    hidden_units = best_architecture.get('hidden_units', [])
                     
                     code += f"""
+        # Fully connected layers for MLP
+        self.flatten = nn.Flatten()
+        
+        # Input layer
+        input_size = self.input_shape[0] * self.input_shape[1] * self.input_shape[2]
+        
+"""
+                    for i in range(best_architecture['num_layers']):
+                        if i < len(hidden_units):
+                            input_dim = input_size if i == 0 else hidden_units[i-1]
+                            output_dim = hidden_units[i]
+                            code += f"        self.fc{i+1} = nn.Linear({input_dim}, {output_dim})\n"
+                    
+                    # Output layer
+                    if hidden_units:
+                        code += f"        self.classifier = nn.Linear({hidden_units[-1]}, num_classes)\n"
+                    else:
+                        code += f"        self.classifier = nn.Linear(input_size, num_classes)\n"
+
+                else:
+                    # CNN, ResNet, or MobileNet architecture
+                    in_channels = best_architecture['input_shape'][0]
+                    filters = best_architecture.get('filters', [])
+                    kernel_sizes = best_architecture.get('kernel_sizes', [])
+                    
+                    code += "        # Convolutional layers\n"
+                    
+                    for i in range(best_architecture['num_layers']):
+                        if i < len(filters) and i < len(kernel_sizes):
+                            out_channels = filters[i]
+                            kernel_size = kernel_sizes[i]
+                            code += f"""
         # Layer {i+1}
-        self.conv{i+1} = nn.Conv2d(in_channels={in_channels}, out_channels={filters}, 
+        self.conv{i+1} = nn.Conv2d(in_channels={in_channels}, out_channels={out_channels}, 
                                   kernel_size={kernel_size}, padding={kernel_size//2})
 """
-                    if best_architecture.get('use_batch_norm', False):
-                        code += f"        self.bn{i+1} = nn.BatchNorm2d({filters})\n"
-                        
-                    in_channels = filters
-                
-                # Add forward method
-                code += """
+                            if best_architecture.get('use_batch_norm', False):
+                                code += f"        self.bn{i+1} = nn.BatchNorm2d({out_channels})\n"
+                                
+                            in_channels = out_channels
+                    
+                    # Add global average pooling and classifier
+                    if filters:
+                        code += f"""
         # Global average pooling and classifier
         self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.classifier = nn.Linear(in_features={}, out_features=num_classes)
-        
-        # Dropout
-        self.dropout = nn.Dropout(p={})
-        
-    def forward(self, x):
-""".format(best_architecture['filters'][-1], best_architecture.get('dropout_rate', 0.0))
+        self.classifier = nn.Linear(in_features={filters[-1]}, out_features=num_classes)
+"""
+                    else:
+                        code += f"""
+        # Global average pooling and classifier
+        self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Linear(in_features={in_channels}, out_features=num_classes)
+"""
                 
-                # Add forward pass for each layer
-                for i in range(best_architecture['num_layers']):
-                    activation = best_architecture['activations'][i]
-                    code += f"""
+                # Add dropout
+                code += f"""
+        # Dropout
+        self.dropout = nn.Dropout(p={best_architecture.get('dropout_rate', 0.0)})
+"""
+                
+                # Forward method based on network type
+                if network_type == 'mlp':
+                    code += """
+    def forward(self, x):
+        # Flatten the input
+        x = self.flatten(x)
+        
+"""
+                    # Forward for each layer
+                    for i in range(best_architecture['num_layers']):
+                        activation = best_architecture.get('activations', ['relu'] * best_architecture['num_layers'])[i] if i < len(best_architecture.get('activations', [])) else 'relu'
+                        code += f"""
+        # Layer {i+1}
+        x = self.fc{i+1}(x)
+"""
+                        # Activation
+                        if activation == 'relu':
+                            code += "        x = F.relu(x)\n"
+                        elif activation == 'leaky_relu':
+                            code += "        x = F.leaky_relu(x, 0.1)\n"
+                        elif activation == 'elu':
+                            code += "        x = F.elu(x)\n"
+                        elif activation == 'selu':
+                            code += "        x = F.selu(x)\n"
+                        
+                        # Dropout
+                        code += "        x = self.dropout(x)\n"
+                else:
+                    # CNN, ResNet, or MobileNet forward
+                    code += """
+    def forward(self, x):
+"""
+                    # Forward for each convolutional layer
+                    for i in range(best_architecture['num_layers']):
+                        activation = best_architecture.get('activations', ['relu'] * best_architecture['num_layers'])[i] if i < len(best_architecture.get('activations', [])) else 'relu'
+                        
+                        code += f"""
         # Layer {i+1}
         x = self.conv{i+1}(x)
 """
-                    if best_architecture.get('use_batch_norm', False):
-                        code += f"        x = self.bn{i+1}(x)\n"
-                        
-                    if activation == 'relu':
-                        code += "        x = F.relu(x)\n"
-                    elif activation == 'leaky_relu':
-                        code += "        x = F.leaky_relu(x, 0.1)\n"
-                    elif activation == 'elu':
-                        code += "        x = F.elu(x)\n"
-                    elif activation == 'selu':
-                        code += "        x = F.selu(x)\n"
+                        # Batch normalization
+                        if best_architecture.get('use_batch_norm', False):
+                            code += f"        x = self.bn{i+1}(x)\n"
+                            
+                        # Activation
+                        if activation == 'relu':
+                            code += "        x = F.relu(x)\n"
+                        elif activation == 'leaky_relu':
+                            code += "        x = F.leaky_relu(x, 0.1)\n"
+                        elif activation == 'elu':
+                            code += "        x = F.elu(x)\n"
+                        elif activation == 'selu':
+                            code += "        x = F.selu(x)\n"
                     
-                    # Add skip connections if applicable
-                    if 'use_skip_connections' in best_architecture and i > 0:
-                        if best_architecture['use_skip_connections'][i]:
-                            # Find a compatible earlier layer
-                            for j in range(i):
-                                if best_architecture['filters'][j] == best_architecture['filters'][i]:
-                                    code += f"        # Skip connection from layer {j+1}\n"
-                                    code += f"        if hasattr(self, 'skip_{j+1}_{i+1}'):\n"
-                                    code += f"            x = x + self.skip_{j+1}_{i+1}\n"
-                                    break
-                    
-                # Add final global average pooling and classification
-                code += """
+                    # Add final global average pooling and classification
+                    code += """
         # Global average pooling
         x = self.global_avg_pool(x)
         x = x.view(x.size(0), -1)
@@ -477,7 +594,10 @@ class BestModel(nn.Module):
         
         # Classification
         x = self.classifier(x)
-        
+"""
+                
+                # Complete the code with the return statement and model creation
+                code += """
         return x
 
 # Create model instance
