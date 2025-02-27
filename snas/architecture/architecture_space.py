@@ -1,10 +1,3 @@
-"""
-Architecture Space for S-NAS
-
-This module defines the space of possible neural network architectures
-that can be explored during the search process.
-"""
-
 import random
 import copy
 from typing import Dict, List, Any
@@ -26,7 +19,7 @@ class ArchitectureSpace:
         # Define the possible values for each architecture parameter
         self.space = {
             # Network type
-            'network_type': ['cnn', 'mlp', 'resnet', 'mobilenet'],
+            'network_type': ['cnn', 'mlp', 'enhanced_mlp', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet'],
             
             # Number of layers in the network
             'num_layers': [2, 3, 4, 5, 6, 7, 8],
@@ -103,7 +96,7 @@ class ArchitectureSpace:
         }
         
         # Add network-specific parameters based on the type
-        if network_type == 'cnn' or network_type == 'resnet' or network_type == 'mobilenet':
+        if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
             # For CNN-based architectures
             architecture.update({
                 'filters': [random.choice(self.space['filters']) for _ in range(num_layers)],
@@ -115,13 +108,45 @@ class ArchitectureSpace:
             # Add MobileNet specific parameters
             if network_type == 'mobilenet':
                 architecture['width_multiplier'] = random.choice(self.space['width_multiplier'])
+            # Add DenseNet specific parameters
+            elif network_type == 'densenet':
+                architecture['growth_rate'] = random.choice([12, 24, 32, 48])
+                architecture['block_config'] = random.choice([[6, 12, 24, 16], [6, 12, 32, 32], [6, 12, 48, 32]])
+                architecture['compression_factor'] = random.choice([0.5, 0.7, 0.8])
+                architecture['bn_size'] = random.choice([2, 4])
+            # Add ShuffleNetV2 specific parameters
+            elif network_type == 'shufflenetv2':
+                architecture['width_multiplier'] = random.choice([0.5, 0.75, 1.0, 1.25, 1.5])
+                # Define channel configurations for different model sizes
+                if architecture['width_multiplier'] <= 0.5:
+                    architecture['out_channels'] = [36, 72, 144, 576]
+                elif architecture['width_multiplier'] <= 1.0:
+                    architecture['out_channels'] = [116, 232, 464, 1024]
+                else:
+                    architecture['out_channels'] = [176, 352, 704, 1408]
+                architecture['num_blocks_per_stage'] = random.choice([[2, 4, 2], [3, 7, 3], [4, 8, 4]])
+            # Add EfficientNet specific parameters
+            elif network_type == 'efficientnet':
+                architecture['width_factor'] = random.choice([0.5, 0.75, 1.0, 1.25, 1.5])
+                architecture['depth_factor'] = random.choice([0.8, 1.0, 1.2, 1.4])
+                architecture['se_ratio'] = random.choice([0.0, 0.125, 0.25])
                 
-        elif network_type == 'mlp':
+        elif network_type == 'mlp' or network_type == 'enhanced_mlp':
             # For MLP architecture
             architecture.update({
                 'hidden_units': [random.choice(self.space['hidden_units']) for _ in range(num_layers)],
                 'activations': [random.choice(self.space['activations']) for _ in range(num_layers)],
             })
+            
+            # Add Enhanced MLP specific parameters
+            if network_type == 'enhanced_mlp':
+                architecture['use_residual'] = random.choice([True, False])
+                architecture['use_layer_norm'] = random.choice([True, False])
+                # Add GELU to possible activations for enhanced MLP
+                gelu_option = random.random() < 0.3  # 30% chance to use GELU
+                if gelu_option:
+                    idx = random.randint(0, num_layers-1)
+                    architecture['activations'][idx] = 'gelu'
         
         return architecture
     
@@ -146,7 +171,7 @@ class ArchitectureSpace:
         network_type = architecture['network_type']
         
         # Check network-specific parameters
-        if network_type == 'cnn' or network_type == 'resnet' or network_type == 'mobilenet':
+        if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
             # For CNN-based architectures
             cnn_params = ['filters', 'kernel_sizes', 'activations']
             for param in cnn_params:
@@ -158,13 +183,39 @@ class ArchitectureSpace:
             for param in cnn_params:
                 if param in architecture and len(architecture[param]) != num_layers:
                     return False
+            
+            # Check specific architecture requirements
+            if network_type == 'mobilenet' and 'width_multiplier' not in architecture:
+                return False
+            elif network_type == 'densenet':
+                for param in ['growth_rate', 'block_config', 'compression_factor', 'bn_size']:
+                    if param not in architecture:
+                        return False
+            elif network_type == 'shufflenetv2':
+                for param in ['width_multiplier', 'out_channels', 'num_blocks_per_stage']:
+                    if param not in architecture:
+                        return False
+            elif network_type == 'efficientnet':
+                for param in ['width_factor', 'depth_factor', 'se_ratio']:
+                    if param not in architecture:
+                        return False
                     
-        elif network_type == 'mlp':
+        elif network_type == 'mlp' or network_type == 'enhanced_mlp':
             # For MLP architecture
             if 'hidden_units' not in architecture or 'activations' not in architecture:
                 return False
-                
+            
             # Check if layer-specific parameters have the correct length
+            num_layers = architecture['num_layers']
+            for param in ['hidden_units', 'activations']:
+                if param in architecture and len(architecture[param]) != num_layers:
+                    return False
+                    
+            # Check Enhanced MLP specific parameters
+            if network_type == 'enhanced_mlp':
+                for param in ['use_residual', 'use_layer_norm']:
+                    if param not in architecture:
+                        return False
             num_layers = architecture['num_layers']
             if len(architecture['hidden_units']) != num_layers or len(architecture['activations']) != num_layers:
                 return False

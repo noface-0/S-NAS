@@ -1,9 +1,3 @@
-"""
-Visualizer for S-NAS
-
-This module provides visualization utilities for the neural architecture search process.
-"""
-
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -415,3 +409,83 @@ class SearchVisualizer:
         img_str = base64.b64encode(buf.read()).decode('utf-8')
         
         return img_str
+    
+    def plot_search_progress(self, history, metric='best_fitness'):
+        """
+        Plot the progress of the search over generations.
+        
+        Args:
+            history: Search history from EvolutionarySearch
+            metric: Metric to plot ('best_fitness', 'avg_fitness', or 'population_diversity')
+                
+        Returns:
+            fig: Matplotlib figure
+        """
+        # Create figure
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Extract data
+        generations = history['generations']
+        
+        # Determine if we're dealing with a loss metric (lower is better)
+        is_loss_metric = False
+        if 'metric_type' in history and history['metric_type'] == 'loss':
+            is_loss_metric = True
+        elif any(best_fitness < 1.0 for best_fitness in history['best_fitness']) and max(history['best_fitness']) < 5.0:
+            # Heuristic: If the best fitness values are consistently small (<5) and some are less than 1,
+            # it's likely a loss metric. This is imperfect but helps when 'metric_type' isn't available.
+            is_loss_metric = True
+        
+        if metric == 'multiple':
+            # Plot multiple metrics on the same graph
+            ax.plot(generations, history['best_fitness'], 'b-', label='Best Fitness')
+            ax.plot(generations, history['avg_fitness'], 'g-', label='Average Fitness')
+            
+            # Add diversity on a second axis
+            ax2 = ax.twinx()
+            ax2.plot(generations, history['population_diversity'], 'r--', label='Diversity')
+            ax2.set_ylabel('Diversity', color='r')
+            ax2.tick_params(axis='y', colors='r')
+            
+            # Set labels for primary axis based on metric type
+            if is_loss_metric:
+                ax.set_ylabel('Loss (lower is better)')
+                ax.set_title('Search Progress (Loss) Over Generations')
+            else:
+                ax.set_ylabel('Fitness (higher is better)')
+                ax.set_title('Search Progress Over Generations')
+        else:
+            # Plot a single metric
+            ax.plot(generations, history[metric], 'b-')
+            
+            # Set labels based on metric type
+            if metric == 'best_fitness':
+                if is_loss_metric:
+                    ax.set_ylabel('Best Loss (lower is better)')
+                    ax.set_title('Best Loss Over Generations')
+                else:
+                    ax.set_ylabel('Best Fitness')
+                    ax.set_title('Best Fitness Over Generations')
+                    
+            elif metric == 'avg_fitness':
+                if is_loss_metric:
+                    ax.set_ylabel('Average Loss (lower is better)')
+                    ax.set_title('Average Loss Over Generations')
+                else:
+                    ax.set_ylabel('Average Fitness')
+                    ax.set_title('Average Fitness Over Generations')
+                    
+            elif metric == 'population_diversity':
+                ax.set_ylabel('Population Diversity')
+                ax.set_title('Population Diversity Over Generations')
+        
+        # Add grid and legend
+        ax.grid(True, linestyle='--', alpha=0.7)
+        if metric == 'multiple':
+            lines1, labels1 = ax.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax.legend(lines1 + lines2, labels1 + labels2, loc='center right')
+        
+        # Tight layout
+        fig.tight_layout()
+        return fig

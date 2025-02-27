@@ -1,9 +1,3 @@
-"""
-Job Distributor for S-NAS
-
-This module manages the distribution of evaluation jobs across multiple GPUs.
-"""
-
 import os
 import time
 import threading

@@ -1,9 +1,3 @@
-"""
-Streamlit Application for S-NAS - Modified with Lazy Loading
-
-This module provides a Streamlit-based user interface for the S-NAS system.
-"""
-
 import os
 import time
 import json
@@ -55,31 +49,53 @@ def save_search_results(dataset_name, search_history, best_architecture, best_fi
     return filename
 
 def load_search_results(filename):
-    """Load search results from disk."""
-    # Load history
-    history_path = os.path.join(RESULTS_DIR, f"{filename}_history.pkl")
-    with open(history_path, 'rb') as f:
-        history = pickle.load(f)
-    
-    # Load best architecture
-    arch_path = os.path.join(RESULTS_DIR, f"{filename}_best.json")
-    with open(arch_path, 'r') as f:
-        best_architecture = json.load(f)
+    """Load search results from disk with error handling."""
+    try:
+        # Load history
+        history_path = os.path.join(RESULTS_DIR, f"{filename}_history.pkl")
+        if not os.path.exists(history_path):
+            raise FileNotFoundError(f"History file not found: {history_path}")
+            
+        with open(history_path, 'rb') as f:
+            history = pickle.load(f)
         
-    return history, best_architecture
+        # History should be a dictionary
+        if not isinstance(history, dict):
+            raise ValueError(f"Invalid history format: expected dictionary, got {type(history)}")
+        
+        # Load best architecture
+        arch_path = os.path.join(RESULTS_DIR, f"{filename}_best.json")
+        if not os.path.exists(arch_path):
+            raise FileNotFoundError(f"Architecture file not found: {arch_path}")
+            
+        with open(arch_path, 'r') as f:
+            best_architecture = json.load(f)
+        
+        # Architecture should be a dictionary
+        if not isinstance(best_architecture, dict):
+            raise ValueError(f"Invalid architecture format: expected dictionary, got {type(best_architecture)}")
+            
+        return history, best_architecture
+    except (FileNotFoundError, json.JSONDecodeError, pickle.UnpicklingError) as e:
+        # Re-raise with more context
+        raise Exception(f"Failed to load search results: {str(e)}")
+    except Exception as e:
+        # Catch-all for unexpected errors
+        raise Exception(f"Unexpected error loading search results: {str(e)}")
 
 @st.cache_resource
 def get_available_datasets():
     """Get list of available datasets without loading them."""
     return [
         "cifar10", "cifar100", "svhn", "mnist", 
-        "kmnist", "qmnist", "emnist", "fashion_mnist"
+        "kmnist", "qmnist", "emnist", "fashion_mnist",
+        "stl10", "dtd", "gtsrb"
     ]
 
 @st.cache_resource
 def get_network_types():
     """Get list of available network types."""
-    return ["all", "cnn", "mlp", "resnet", "mobilenet"]
+    return ["all", "cnn", "mlp", "enhanced_mlp", "resnet", "mobilenet", "densenet", "shufflenetv2", "efficientnet"]
 
 def get_result_files():
     """Get list of available result files."""
@@ -130,7 +146,7 @@ def main():
     This application provides an interface for the S-NAS system, which automates the discovery
     of optimal neural network architectures for specific datasets. Rather than manually designing
     neural networks, S-NAS efficiently explores different architecture configurations to find
-    ones that perform best on predefined benchmark datasets.
+    ones that perform best on a predefined benchmark datasets.
     """)
 
     # Sidebar for configuration
@@ -265,7 +281,7 @@ def main():
                     generations=num_generations,
                     elite_size=2,
                     tournament_size=3,
-                    metric="val_acc",
+                    metric=monitor,
                     save_history=True
                 )
                 
@@ -357,69 +373,152 @@ def main():
         if selected_result != "None":
             # Load selected results
             with st.spinner("Loading results..."):
-                history, best_architecture = load_search_results(selected_result)
-                best_fitness = max(history['best_fitness'])
-                
-                # Create visualizer
-                visualizer = SearchVisualizer()
+                try:
+                    history, best_architecture = load_search_results(selected_result)
+                    
+                    # Handle case where history might be incomplete or empty
+                    if 'best_fitness' not in history or not history['best_fitness']:
+                        st.error("The selected result file appears to be incomplete or corrupted.")
+                        best_fitness = 0.0
+                    else:
+                        best_fitness = max(history['best_fitness'])
+                    
+                    # Create visualizer
+                    visualizer = SearchVisualizer()
+                except Exception as e:
+                    st.error(f"Error loading results: {str(e)}")
+                    st.info("The selected result file might be corrupted or in an incompatible format.")
+                    return
             
             # Display summary
-            st.markdown(f"""
-            ### Result Summary: {selected_result}
-            - **Dataset**: {selected_result.split("_")[0]}
-            - **Best Validation Accuracy**: {best_fitness:.4f}
-            - **Architecture Depth**: {best_architecture['num_layers']} layers
-            """)
+            try:
+                # Check if architecture is valid before attempting to display details
+                if not isinstance(best_architecture, dict) or 'num_layers' not in best_architecture:
+                    st.error("The architecture information in this result file is incomplete or invalid.")
+                    return
+                
+                # Try to extract dataset from filename, with a fallback option
+                try:
+                    dataset_name = selected_result.split("_")[0]
+                except:
+                    dataset_name = "unknown"
+                
+                st.markdown(f"""
+                ### Result Summary: {selected_result}
+                - **Dataset**: {dataset_name}
+                - **Best Validation Accuracy**: {best_fitness:.4f}
+                - **Architecture Depth**: {best_architecture['num_layers']} layers
+                - **Network Type**: {best_architecture.get('network_type', 'unknown')}
+                """)
+            except Exception as e:
+                st.error(f"Error displaying summary: {str(e)}")
+                return
             
             # Plot search progress
-            st.subheader("Search Progress")
-            fig = visualizer.plot_search_progress(history, metric="multiple")
-            st.pyplot(fig)
+            try:
+                st.subheader("Search Progress")
+                # Check if history contains required fields for plotting
+                if ('generations' not in history or not history['generations'] or 
+                    'best_fitness' not in history or not history['best_fitness']):
+                    st.warning("Cannot generate search progress plot - history data is incomplete")
+                else:
+                    fig = visualizer.plot_search_progress(history, metric="multiple")
+                    st.pyplot(fig)
+            except Exception as e:
+                st.error(f"Error generating search progress plot: {str(e)}")
             
             # Plot architecture
-            st.subheader("Architecture Visualization")
-            fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
-            st.pyplot(fig)
+            try:
+                st.subheader("Architecture Visualization")
+                fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
+                st.pyplot(fig)
+            except Exception as e:
+                st.error(f"Error generating architecture visualization: {str(e)}")
             
             # Plot parameter importance
-            st.subheader("Parameter Importance Analysis")
-            fig = visualizer.plot_parameter_importance(history, top_k=10)
-            st.pyplot(fig)
+            try:
+                st.subheader("Parameter Importance Analysis")
+                # Check if history contains required fields for parameter importance
+                if 'best_architecture' not in history or not history['best_architecture']:
+                    st.warning("Cannot generate parameter importance analysis - history data is incomplete")
+                else:
+                    fig = visualizer.plot_parameter_importance(history, top_k=10)
+                    st.pyplot(fig)
+            except Exception as e:
+                st.error(f"Error generating parameter importance analysis: {str(e)}")
             
             # Display architecture details
-            st.subheader("Architecture Details")
-            
-            # Convert architecture to DataFrame for better display
-            arch_df = pd.DataFrame()
-            
-            # Layer information
-            if 'filters' in best_architecture:
-                arch_df['Filters'] = best_architecture['filters']
-            if 'kernel_sizes' in best_architecture:
-                arch_df['Kernel Size'] = best_architecture['kernel_sizes']
-            if 'activations' in best_architecture:
-                arch_df['Activation'] = best_architecture['activations']
-            if 'use_skip_connections' in best_architecture:
-                arch_df['Skip Connection'] = [
-                    "Yes" if x else "No" 
-                    for x in best_architecture['use_skip_connections']
-                ]
+            try:
+                st.subheader("Architecture Details")
                 
-            # Add layer names
-            if not arch_df.empty:
-                arch_df.index = [f"Layer {i+1}" for i in range(len(arch_df))]
-            
-                # Display the DataFrame
-                st.dataframe(arch_df)
-            
-            # Global parameters
-            st.subheader("Global Parameters")
-            global_params = {}
-            for param in ['network_type', 'learning_rate', 'dropout_rate', 'optimizer', 'use_batch_norm']:
-                if param in best_architecture:
-                    global_params[param] = best_architecture[param]
-                    
-            st.json(global_params)
+                # Convert architecture to DataFrame for better display
+                arch_df = pd.DataFrame()
+                
+                # Layer information based on network type
+                network_type = best_architecture.get('network_type', 'unknown')
+                
+                # CNN, ResNet, MobileNet, and other CNN-based architectures
+                if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
+                    if 'filters' in best_architecture:
+                        arch_df['Filters'] = best_architecture['filters']
+                    if 'kernel_sizes' in best_architecture:
+                        arch_df['Kernel Size'] = best_architecture['kernel_sizes']
+                    if 'activations' in best_architecture:
+                        arch_df['Activation'] = best_architecture['activations']
+                    if 'use_skip_connections' in best_architecture:
+                        arch_df['Skip Connection'] = [
+                            "Yes" if x else "No" 
+                            for x in best_architecture['use_skip_connections']
+                        ]
+                
+                # MLP and Enhanced MLP
+                elif network_type in ['mlp', 'enhanced_mlp']:
+                    if 'hidden_units' in best_architecture:
+                        arch_df['Hidden Units'] = best_architecture['hidden_units']
+                    if 'activations' in best_architecture:
+                        arch_df['Activation'] = best_architecture['activations']
+                        
+                # Add layer names
+                if not arch_df.empty:
+                    arch_df.index = [f"Layer {i+1}" for i in range(len(arch_df))]
+                
+                    # Display the DataFrame
+                    st.dataframe(arch_df)
+                else:
+                    st.info("No layer-specific parameters found in this architecture")
+                
+                # Global parameters
+                st.subheader("Global Parameters")
+                global_params = {}
+                
+                # Common parameters for all network types
+                for param in ['network_type', 'learning_rate', 'dropout_rate', 'optimizer', 'use_batch_norm']:
+                    if param in best_architecture:
+                        global_params[param] = best_architecture[param]
+                
+                # Network-specific parameters
+                if network_type == 'mobilenet' and 'width_multiplier' in best_architecture:
+                    global_params['width_multiplier'] = best_architecture['width_multiplier']
+                elif network_type == 'densenet':
+                    for param in ['growth_rate', 'compression_factor', 'bn_size']:
+                        if param in best_architecture:
+                            global_params[param] = best_architecture[param]
+                elif network_type == 'shufflenetv2':
+                    for param in ['width_multiplier']:
+                        if param in best_architecture:
+                            global_params[param] = best_architecture[param]
+                elif network_type == 'efficientnet':
+                    for param in ['width_factor', 'depth_factor', 'se_ratio']:
+                        if param in best_architecture:
+                            global_params[param] = best_architecture[param]
+                elif network_type == 'enhanced_mlp':
+                    for param in ['use_residual', 'use_layer_norm']:
+                        if param in best_architecture:
+                            global_params[param] = best_architecture[param]
+                        
+                st.json(global_params)
+            except Exception as e:
+                st.error(f"Error displaying architecture details: {str(e)}")
         else:
             st.info("Select a previous result from the sidebar to view details.")
 

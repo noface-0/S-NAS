@@ -1,9 +1,3 @@
-"""
-Main entry point for S-NAS.
-
-This script provides a command-line interface for running S-NAS experiments.
-"""
-
 import os
 import sys
 import json
@@ -41,7 +35,8 @@ def parse_args():
     # Dataset options
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=['cifar10', 'cifar100', 'svhn', 'mnist', 
-                                'kmnist', 'qmnist', 'emnist', 'fashion_mnist'],
+                                'kmnist', 'qmnist', 'emnist', 'fashion_mnist',
+                                'stl10', 'dtd', 'gtsrb'],
                         help='Dataset to use for architecture search')
     parser.add_argument('--custom-csv-dataset', type=str, default=None,
                         help='Path to CSV file for custom dataset')
@@ -55,7 +50,8 @@ def parse_args():
     
     # Network type options
     parser.add_argument('--network-type', type=str, default=None,
-                        choices=['all', 'cnn', 'mlp', 'resnet', 'mobilenet'],
+                        choices=['all', 'cnn', 'mlp', 'enhanced_mlp', 'resnet', 'mobilenet', 
+                                'densenet', 'shufflenetv2', 'efficientnet'],
                         help='Type of neural network architecture to search ('
                              'all=search all types, None=use network_type in architecture file)')
     
@@ -68,6 +64,10 @@ def parse_args():
                         help='Mutation rate for evolutionary search')
     parser.add_argument('--elite-size', type=int, default=2,
                         help='Number of top architectures to preserve unchanged')
+    parser.add_argument('--checkpoint-frequency', type=int, default=5,
+                        help='Save checkpoint every N generations (0 to disable)')
+    parser.add_argument('--resume-from', type=str, default=None,
+                        help='Path to checkpoint file to resume search from')
     
     # Training parameters
     parser.add_argument('--max-epochs', type=int, default=10,
@@ -88,6 +88,12 @@ def parse_args():
     # Evaluation options
     parser.add_argument('--extended-metrics', action='store_true',
                        help='Compute extended metrics (precision, recall, F1, etc.)')
+    
+    # Parameter sharing options (ENAS approach)
+    parser.add_argument('--enable-weight-sharing', action='store_true',
+                       help='Enable weight sharing between models (ENAS approach)')
+    parser.add_argument('--weight-sharing-max-models', type=int, default=100,
+                       help='Maximum number of models to keep in the weight sharing pool')
     
     # Export options
     parser.add_argument('--export-model', action='store_true',
@@ -185,7 +191,7 @@ def setup_components(args):
     # Set up model builder
     model_builder = ModelBuilder(device=device)
     
-    # Set up evaluator
+    # Set up evaluator with optional weight sharing (ENAS approach)
     evaluator = Evaluator(
         dataset_registry=dataset_registry,
         model_builder=model_builder,
@@ -193,7 +199,9 @@ def setup_components(args):
         max_epochs=args.max_epochs,
         patience=args.patience,
         min_delta=args.min_delta,
-        monitor=args.monitor
+        monitor=args.monitor,
+        enable_weight_sharing=args.enable_weight_sharing,
+        weight_sharing_max_models=args.weight_sharing_max_models
     )
     
     # Setup GPU IDs if specified
@@ -310,7 +318,10 @@ def run_search(args, components, experiment_name, results_dir, models_dir):
         elite_size=args.elite_size,
         tournament_size=3,
         metric='val_acc',
-        save_history=True
+        save_history=True,
+        checkpoint_frequency=args.checkpoint_frequency,  # Use the command-line argument
+        output_dir=args.output_dir,
+        results_dir=results_dir
     )
     
     # Force specific network type if specified
@@ -331,12 +342,30 @@ def run_search(args, components, experiment_name, results_dir, models_dir):
         # Replace the method
         search.architecture_space.sample_random_architecture = sample_with_fixed_type
     
+    # Check if we should resume from checkpoint
+    start_generation = 0
+    if args.resume_from:
+        try:
+            logger.info(f"Attempting to resume from checkpoint: {args.resume_from}")
+            # Call the evolve method with the resume_from parameter
+            best_architecture, best_fitness, history = search.evolve(
+                fast_mode_generations=args.fast_mode_gens,
+                resume_from=args.resume_from
+            )
+            # Save results and return early since evolve handles the full search process
+            save_results(experiment_name, history, best_architecture, best_fitness, results_dir, models_dir)
+            logger.info(f"Search resumed and completed! Best fitness: {best_fitness:.4f}")
+            return best_architecture, best_fitness, history
+        except Exception as e:
+            logger.error(f"Failed to resume from checkpoint: {e}")
+            logger.info("Starting new search instead")
+    
     # Initialize population
     logger.info("Initializing population...")
     search.initialize_population()
     
     # Run evolutionary search
-    for generation in range(args.generations):
+    for generation in range(start_generation, args.generations):
         logger.info(f"Generation {generation + 1}/{args.generations}")
         
         # Use fast mode for early generations

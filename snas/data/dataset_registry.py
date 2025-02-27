@@ -1,10 +1,3 @@
-"""
-Dataset Registry for S-NAS
-
-This module manages standardized datasets with consistent preprocessing for neural architecture search.
-It provides a unified interface for accessing common benchmark datasets and custom datasets.
-"""
-
 import os
 import torch
 import torchvision
@@ -229,6 +222,21 @@ class DatasetRegistry:
             'fashion_mnist': {
                 'input_shape': (1, 28, 28),
                 'num_classes': 10,
+                'metric': 'accuracy'
+            },
+            'stl10': {
+                'input_shape': (3, 96, 96),
+                'num_classes': 10,
+                'metric': 'accuracy'
+            },
+            'dtd': {
+                'input_shape': (3, 224, 224),
+                'num_classes': 47,
+                'metric': 'accuracy'
+            },
+            'gtsrb': {
+                'input_shape': (3, 32, 32),  # Will be resized to this
+                'num_classes': 43,
                 'metric': 'accuracy'
             }
         }
@@ -457,6 +465,12 @@ class DatasetRegistry:
             return self._get_emnist(val_split)
         elif dataset_name == 'fashion_mnist':
             return self._get_fashion_mnist(val_split)
+        elif dataset_name == 'stl10':
+            return self._get_stl10(val_split)
+        elif dataset_name == 'dtd':
+            return self._get_dtd(val_split)
+        elif dataset_name == 'gtsrb':
+            return self._get_gtsrb(val_split)
         else:
             raise ValueError(f"Dataset {dataset_name} not supported. "
                            f"Supported datasets: {list(self.dataset_configs.keys()) + list(self.custom_configs.keys())}")
@@ -470,6 +484,168 @@ class DatasetRegistry:
             'standard': standard_datasets,
             'custom': custom_datasets
         }
+    
+    def _get_stl10(self, val_split):
+        """Set up STL-10 dataset with standard preprocessing."""
+        # Define transformations for 96x96 images
+        train_transform = transforms.Compose([
+            transforms.RandomCrop(96, padding=12),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4467, 0.4398, 0.4066), (0.2603, 0.2566, 0.2713))
+        ])
+        
+        test_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4467, 0.4398, 0.4066), (0.2603, 0.2566, 0.2713))
+        ])
+        
+        # Load datasets - STL-10 has 'train' and 'test' splits
+        train_set = torchvision.datasets.STL10(
+            root=self.data_dir, split='train', download=True, transform=train_transform)
+        
+        # For STL-10, we'll use the provided test split directly
+        test_set = torchvision.datasets.STL10(
+            root=self.data_dir, split='test', download=True, transform=test_transform)
+        
+        # Split training set into train and validation
+        val_size = int(len(train_set) * val_split)
+        train_size = len(train_set) - val_size
+        train_subset, val_subset = random_split(
+            train_set, [train_size, val_size], 
+            generator=torch.Generator().manual_seed(42)
+        )
+        
+        # Create data loaders with configurable parameters
+        train_loader_kwargs = {
+            'batch_size': self.batch_size,
+            'shuffle': True,
+            'num_workers': self.num_workers,
+            'pin_memory': self.pin_memory,
+            **self.dataloader_kwargs
+        }
+        
+        eval_loader_kwargs = {
+            'batch_size': self.batch_size,
+            'shuffle': False,
+            'num_workers': self.num_workers,
+            'pin_memory': self.pin_memory,
+            **self.dataloader_kwargs
+        }
+        
+        train_loader = DataLoader(train_subset, **train_loader_kwargs)
+        val_loader = DataLoader(val_subset, **eval_loader_kwargs)
+        test_loader = DataLoader(test_set, **eval_loader_kwargs)
+        
+        return train_loader, val_loader, test_loader
+    
+    def _get_dtd(self, val_split):
+        """Set up Describable Textures Dataset (DTD) with standard preprocessing."""
+        # Define transformations for 224x224 images
+        train_transform = transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+        ])
+        
+        test_transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+        ])
+        
+        # Load datasets - DTD has built-in splits
+        train_set = torchvision.datasets.DTD(
+            root=self.data_dir, split='train', download=True, transform=train_transform)
+        
+        # Use validation set as our validation set
+        val_set = torchvision.datasets.DTD(
+            root=self.data_dir, split='val', download=True, transform=test_transform)
+        
+        # Use test set as our test set
+        test_set = torchvision.datasets.DTD(
+            root=self.data_dir, split='test', download=True, transform=test_transform)
+        
+        # Create data loaders with configurable parameters
+        train_loader_kwargs = {
+            'batch_size': self.batch_size,
+            'shuffle': True,
+            'num_workers': self.num_workers,
+            'pin_memory': self.pin_memory,
+            **self.dataloader_kwargs
+        }
+        
+        eval_loader_kwargs = {
+            'batch_size': self.batch_size,
+            'shuffle': False,
+            'num_workers': self.num_workers,
+            'pin_memory': self.pin_memory,
+            **self.dataloader_kwargs
+        }
+        
+        train_loader = DataLoader(train_set, **train_loader_kwargs)
+        val_loader = DataLoader(val_set, **eval_loader_kwargs)
+        test_loader = DataLoader(test_set, **eval_loader_kwargs)
+        
+        return train_loader, val_loader, test_loader
+    
+    def _get_gtsrb(self, val_split):
+        """Set up German Traffic Sign Recognition Benchmark (GTSRB) with standard preprocessing."""
+        # Define transformations - resizing to 32x32 for consistency
+        train_transform = transforms.Compose([
+            transforms.Resize((32, 32)),
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize((0.3337, 0.3064, 0.3171), (0.2672, 0.2564, 0.2629))
+        ])
+        
+        test_transform = transforms.Compose([
+            transforms.Resize((32, 32)),  # Resize to fixed size
+            transforms.ToTensor(),
+            transforms.Normalize((0.3337, 0.3064, 0.3171), (0.2672, 0.2564, 0.2629))
+        ])
+        
+        # Load datasets - GTSRB only has a train and test split
+        train_set = torchvision.datasets.GTSRB(
+            root=self.data_dir, split='train', download=True, transform=train_transform)
+        
+        test_set = torchvision.datasets.GTSRB(
+            root=self.data_dir, split='test', download=True, transform=test_transform)
+        
+        # Split training set into train and validation
+        val_size = int(len(train_set) * val_split)
+        train_size = len(train_set) - val_size
+        train_subset, val_subset = random_split(
+            train_set, [train_size, val_size], 
+            generator=torch.Generator().manual_seed(42)
+        )
+        
+        # Create data loaders with configurable parameters
+        train_loader_kwargs = {
+            'batch_size': self.batch_size,
+            'shuffle': True,
+            'num_workers': self.num_workers,
+            'pin_memory': self.pin_memory,
+            **self.dataloader_kwargs
+        }
+        
+        eval_loader_kwargs = {
+            'batch_size': self.batch_size,
+            'shuffle': False,
+            'num_workers': self.num_workers,
+            'pin_memory': self.pin_memory,
+            **self.dataloader_kwargs
+        }
+        
+        train_loader = DataLoader(train_subset, **train_loader_kwargs)
+        val_loader = DataLoader(val_subset, **eval_loader_kwargs)
+        test_loader = DataLoader(test_set, **eval_loader_kwargs)
+        
+        return train_loader, val_loader, test_loader
         
     def _get_custom_dataset(self, dataset_name, val_split):
         """Load and prepare a custom dataset."""
