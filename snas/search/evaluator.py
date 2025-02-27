@@ -16,7 +16,8 @@ class Evaluator:
     """Evaluates neural network architectures on a dataset."""
     
     def __init__(self, dataset_registry, model_builder, device=None, 
-                 max_epochs=10, patience=3, log_interval=10):
+                 max_epochs=10, patience=3, log_interval=10, 
+                 min_delta=0.001, monitor='val_acc'):
         """
         Initialize the evaluator.
         
@@ -25,8 +26,10 @@ class Evaluator:
             model_builder: Builder for creating models from architectures
             device: Device to use for training ('cuda' or 'cpu')
             max_epochs: Maximum number of training epochs
-            patience: Early stopping patience
+            patience: Early stopping patience (number of epochs without improvement)
             log_interval: How often to log training progress
+            min_delta: Minimum change to qualify as improvement
+            monitor: Metric to monitor for early stopping ('val_acc' or 'val_loss')
         """
         self.dataset_registry = dataset_registry
         self.model_builder = model_builder
@@ -34,6 +37,8 @@ class Evaluator:
         self.max_epochs = max_epochs
         self.patience = patience
         self.log_interval = log_interval
+        self.min_delta = min_delta
+        self.monitor = monitor
     
     def evaluate(self, architecture, dataset_name, fast_mode=False) -> Dict[str, Any]:
         """
@@ -65,6 +70,7 @@ class Evaluator:
         
         # Set up early stopping
         best_val_acc = 0.0
+        best_val_loss = float('inf')
         patience_counter = 0
         
         # Adjust max epochs for fast mode
@@ -100,14 +106,26 @@ class Evaluator:
                       f'Train loss: {train_loss:.4f}, Train acc: {train_acc:.4f}, '
                       f'Val loss: {val_loss:.4f}, Val acc: {val_acc:.4f}')
             
-            # Check early stopping
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
+            # Check early stopping based on monitored metric
+            improved = False
+            
+            if self.monitor == 'val_acc':
+                if val_acc - best_val_acc > self.min_delta:
+                    best_val_acc = val_acc
+                    improved = True
+            elif self.monitor == 'val_loss':
+                if best_val_loss - val_loss > self.min_delta:
+                    best_val_loss = val_loss
+                    improved = True
+            
+            if improved:
                 patience_counter = 0
                 # Save the best model weights (in memory)
                 best_model_state = model.state_dict().copy()
+                logger.debug(f'Model improved on {self.monitor}')
             else:
                 patience_counter += 1
+                logger.debug(f'Model did not improve for {patience_counter} epochs')
                 if patience_counter >= self.patience:
                     logger.info(f'Early stopping at epoch {epoch+1}')
                     break
