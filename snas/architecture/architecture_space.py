@@ -22,37 +22,37 @@ class ArchitectureSpace:
             'network_type': ['cnn', 'mlp', 'enhanced_mlp', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet'],
             
             # Number of layers in the network
-            'num_layers': [2, 3, 4, 5, 6, 7, 8],
+            'num_layers': [2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 24, 32, 50],
             
             # Possible number of filters (neurons) for each layer
-            'filters': [16, 32, 64, 128, 256],
+            'filters': [16, 32, 64, 128, 256, 512, 1024],
             
             # Possible kernel sizes for conv layers
-            'kernel_sizes': [3, 5, 7],
+            'kernel_sizes': [3, 5, 7, 9],
             
             # Possible hidden units for dense layers (MLP)
-            'hidden_units': [64, 128, 256, 512, 1024],
+            'hidden_units': [64, 128, 256, 512, 1024, 2048, 4096],
             
             # Possible activation functions
-            'activations': ['relu', 'leaky_relu', 'elu', 'selu'],
+            'activations': ['relu', 'leaky_relu', 'elu', 'selu', 'gelu'],
             
             # Possible learning rates
-            'learning_rate': [0.1, 0.01, 0.001, 0.0001],
+            'learning_rate': [0.1, 0.01, 0.001, 0.0001, 0.00001],
             
             # Possible batch normalization options
             'use_batch_norm': [True, False],
             
             # Possible dropout options
-            'dropout_rate': [0.0, 0.1, 0.2, 0.3, 0.5],
+            'dropout_rate': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
             
             # Possible skip connection options
             'use_skip_connections': [True, False],
             
             # Possible growth factors for mobilenet
-            'width_multiplier': [0.5, 0.75, 1.0, 1.25],
+            'width_multiplier': [0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
             
             # Possible optimizers
-            'optimizer': ['sgd', 'adam', 'adamw'],
+            'optimizer': ['sgd', 'adam', 'adamw', 'rmsprop'],
         }
     
     def get_options(self, parameter_name):
@@ -168,8 +168,10 @@ class ArchitectureSpace:
                 return False
         
         # Get network type
-        network_type = architecture['network_type']
-        
+        network_type = architecture.get('network_type')
+        if not isinstance(network_type, str):
+            return False
+            
         # Check network-specific parameters
         if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
             # For CNN-based architectures

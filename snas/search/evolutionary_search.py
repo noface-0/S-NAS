@@ -136,7 +136,7 @@ class EvolutionarySearch:
         # Adjust complexity based on level
         if complexity_level == 1:
             # Simplest architectures - fewer layers, simpler components
-            architecture['num_layers'] = min(3, architecture['num_layers'])
+            architecture['num_layers'] = min(4, architecture['num_layers'])
             
             # Simplify network type - avoid complex types at level 1
             simple_types = ['cnn', 'mlp']
@@ -145,22 +145,36 @@ class EvolutionarySearch:
                 
             # Reduce filters for CNNs or hidden units for MLPs
             if architecture['network_type'] == 'cnn':
-                architecture['filters'] = [min(f, 64) for f in architecture['filters']]
-                architecture['kernel_sizes'] = [3 for _ in range(architecture['num_layers'])]
+                # Initialize CNN-specific parameters if they don't exist
+                if 'filters' not in architecture:
+                    architecture['filters'] = [64 for _ in range(architecture['num_layers'])]
+                else:
+                    architecture['filters'] = [min(f, 128) for f in architecture['filters']]
+                
+                if 'kernel_sizes' not in architecture:
+                    architecture['kernel_sizes'] = [3 for _ in range(architecture['num_layers'])]
+                
+                if 'use_skip_connections' not in architecture:
+                    architecture['use_skip_connections'] = [False for _ in range(architecture['num_layers'])]
+                
                 architecture['use_batch_norm'] = False
-                architecture['use_skip_connections'] = [False for _ in range(architecture['num_layers'])]
-            else:  # mlp
-                architecture['hidden_units'] = [min(h, 256) for h in architecture['hidden_units']]
+                
+            elif architecture['network_type'] == 'mlp':  # Use elif instead of else
+                # Initialize hidden_units if it doesn't exist
+                if 'hidden_units' not in architecture:
+                    architecture['hidden_units'] = [512 for _ in range(architecture['num_layers'])]
+                else:
+                    architecture['hidden_units'] = [min(h, 512) for h in architecture['hidden_units']]
             
             # Simplify activation functions - just use ReLU at level 1
             architecture['activations'] = ['relu' for _ in range(architecture['num_layers'])]
                 
         elif complexity_level == 2:
             # Medium complexity - moderate layers, some advanced features
-            architecture['num_layers'] = min(5, architecture['num_layers'])
+            architecture['num_layers'] = min(8, architecture['num_layers'])
             
             # Allow more network types at level 2
-            medium_types = ['cnn', 'mlp', 'enhanced_mlp', 'resnet']
+            medium_types = ['cnn', 'mlp', 'enhanced_mlp', 'resnet', 'mobilenet']
             if architecture['network_type'] not in medium_types:
                 if random.random() < 0.5:  # 50% chance to keep original type
                     architecture['network_type'] = random.choice(medium_types)
@@ -439,11 +453,70 @@ class EvolutionarySearch:
             # Apply random mutations
             child = self.architecture_space.mutate_architecture(child, self.mutation_rate)
             
+            # For progressive search, ensure the child matches the current complexity level
+            if self.enable_progressive:
+                child = self._adapt_architecture_to_complexity(child, self.complexity_level)
+            
             # Validate the child
             if self.architecture_space.validate_architecture(child):
                 new_population.append(child)
         
         return new_population
+        
+    def _adapt_architecture_to_complexity(self, architecture, complexity_level):
+        """
+        Adapt an architecture to match the current complexity level.
+        
+        This ensures that architectures stay within the appropriate complexity
+        level during the progressive search process.
+        
+        Args:
+            architecture: Architecture to adapt
+            complexity_level: Current complexity level
+            
+        Returns:
+            dict: Adapted architecture
+        """
+        if complexity_level == 1:
+            # Enforce simplest constraints at level 1
+            architecture['num_layers'] = min(3, architecture['num_layers'])
+            
+            # Keep simpler network types
+            simple_types = ['cnn', 'mlp']
+            if architecture['network_type'] not in simple_types:
+                # Don't change randomly - find closest simple type
+                if 'mlp' in architecture['network_type']:
+                    architecture['network_type'] = 'mlp'
+                else:
+                    architecture['network_type'] = 'cnn'
+                    
+            # Limit other parameters based on network type
+            if architecture['network_type'] == 'cnn':
+                architecture['filters'] = [min(f, 64) for f in architecture['filters']]
+            elif architecture['network_type'] == 'mlp' and 'hidden_units' in architecture:
+                architecture['hidden_units'] = [min(h, 256) for h in architecture['hidden_units']]
+        
+        elif complexity_level == 2:
+            # Medium complexity level
+            architecture['num_layers'] = min(5, architecture['num_layers'])
+            
+            # Allow only certain network types at level 2
+            medium_types = ['cnn', 'mlp', 'enhanced_mlp', 'resnet']
+            if architecture['network_type'] not in medium_types:
+                # Try to map to a similar medium-complexity type
+                if 'mlp' in architecture['network_type']:
+                    architecture['network_type'] = 'enhanced_mlp'
+                elif 'net' in architecture['network_type']:
+                    architecture['network_type'] = 'resnet'
+                else:
+                    architecture['network_type'] = 'cnn'
+        
+        # No additional constraints for level 3 (full complexity)
+        
+        # Ensure architecture consistency
+        architecture = self._ensure_architecture_consistency(architecture)
+        
+        return architecture
     
     def calculate_diversity(self):
         """
@@ -518,7 +591,7 @@ class EvolutionarySearch:
         Returns:
             dict: Current search state
         """
-        return {
+        checkpoint_state = {
             'population': self.population,
             'fitness_scores': self.fitness_scores,
             'evaluated_architectures': self.evaluated_architectures,
@@ -533,9 +606,18 @@ class EvolutionarySearch:
                 'generations': self.generations,
                 'elite_size': self.elite_size,
                 'tournament_size': self.tournament_size,
-                'metric': self.metric
+                'metric': self.metric,
+                'enable_progressive': self.enable_progressive
             }
         }
+        
+        # Add progressive search state if enabled
+        if self.enable_progressive:
+            checkpoint_state['complexity_level'] = self.complexity_level
+            checkpoint_state['max_complexity_level'] = self.max_complexity_level
+            checkpoint_state['complexity_transition_point'] = self.complexity_transition_point
+        
+        return checkpoint_state
     
     def restore_from_checkpoint(self, checkpoint):
         """
@@ -562,9 +644,25 @@ class EvolutionarySearch:
             self.best_architecture = checkpoint['best_architecture']
             self.best_fitness = checkpoint['best_fitness']
             
+            # Restore progressive search state if present and enabled
+            if self.enable_progressive:
+                if 'complexity_level' in search_state:
+                    self.complexity_level = search_state['complexity_level']
+                    logger.info(f"Restored complexity level: {self.complexity_level}")
+                
+                if 'max_complexity_level' in search_state:
+                    self.max_complexity_level = search_state['max_complexity_level']
+                
+                if 'complexity_transition_point' in search_state:
+                    self.complexity_transition_point = search_state['complexity_transition_point']
+            
             # Restore history
             if self.save_history:
                 self.history = checkpoint['history']
+                
+                # Ensure complexity_level is in history if progressive search is enabled
+                if self.enable_progressive and 'complexity_level' not in self.history:
+                    self.history['complexity_level'] = []
             
             # Get the generation to resume from
             generation = checkpoint['generation']
@@ -598,6 +696,11 @@ class EvolutionarySearch:
                 # Start from the next generation
                 start_generation += 1
                 logger.info(f"Resuming search from generation {start_generation}")
+                
+                # Restore complexity level for progressive search if resuming
+                if self.enable_progressive and 'complexity_level' in checkpoint['search_state']:
+                    self.complexity_level = checkpoint['search_state']['complexity_level']
+                    logger.info(f"Restored complexity level: {self.complexity_level}")
             except Exception as e:
                 logger.error(f"Failed to resume from checkpoint: {e}")
                 logger.info("Starting new search instead")
@@ -614,6 +717,18 @@ class EvolutionarySearch:
             use_fast_mode = generation < fast_mode_generations
             if use_fast_mode:
                 logger.info("Using fast evaluation mode")
+                
+            # For progressive search, check if we should increase complexity
+            if self.enable_progressive:
+                # Update complexity level at transition points
+                transition_point = (self.complexity_level * self.generations) // (self.max_complexity_level + 1)
+                if generation >= transition_point and self.complexity_level < self.max_complexity_level:
+                    self.complexity_level += 1
+                    logger.info(f"Increasing architecture complexity to level {self.complexity_level}")
+                
+                # Add current complexity level to history
+                if self.save_history:
+                    self.history['complexity_level'].append(self.complexity_level)
             
             try:
                 # Evaluate fitness of each architecture
@@ -632,8 +747,13 @@ class EvolutionarySearch:
                     best_arch = self.population[best_idx].copy()
                     diversity = self.calculate_diversity()
                     
-                    logger.info(f"Generation stats: Avg fitness: {avg_fitness:.4f}, "
-                              f"Best fitness: {best_fitness:.4f}, Diversity: {diversity:.4f}")
+                    if self.enable_progressive:
+                        logger.info(f"Generation stats: Complexity: {self.complexity_level}, "
+                                  f"Avg fitness: {avg_fitness:.4f}, Best fitness: {best_fitness:.4f}, "
+                                  f"Diversity: {diversity:.4f}")
+                    else:
+                        logger.info(f"Generation stats: Avg fitness: {avg_fitness:.4f}, "
+                                  f"Best fitness: {best_fitness:.4f}, Diversity: {diversity:.4f}")
                     
                     # Save history
                     if self.save_history:
