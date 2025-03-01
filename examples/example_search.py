@@ -5,6 +5,12 @@ Example script for running a neural architecture search on CIFAR-10.
 This script demonstrates how to use S-NAS to search for optimal neural network
 architectures on the CIFAR-10 dataset. It includes options for checkpointing
 and search resumption.
+
+S-NAS incorporates two advanced optimization techniques by default:
+1. Parameter sharing (from ENAS paper): Reuses weights between similar architectures
+2. Progressive search (from PNAS paper): Gradually increases architecture complexity
+
+These features make the search process significantly more efficient.
 """
 
 import os
@@ -121,17 +127,19 @@ def main():
     # Set up model builder
     model_builder = ModelBuilder(device=device)
     
-    # Set up evaluator
+    # Set up evaluator with parameter sharing enabled by default
     evaluator = Evaluator(
         dataset_registry=dataset_registry,
         model_builder=model_builder,
         device=device,
         max_epochs=args.max_epochs,
         patience=3,  # Early stopping patience
-        monitor='val_acc'  # Monitor validation accuracy
+        monitor='val_acc',  # Monitor validation accuracy
+        enable_weight_sharing=True,  # Parameter sharing always enabled
+        weight_sharing_max_models=100  # Keep up to 100 models in the pool
     )
     
-    # Create evolutionary search
+    # Create evolutionary search with progressive search enabled by default
     search = EvolutionarySearch(
         architecture_space=architecture_space,
         evaluator=evaluator,
@@ -146,7 +154,8 @@ def main():
         save_history=True,
         checkpoint_frequency=args.checkpoint_frequency,
         output_dir=args.output_dir,
-        results_dir=results_dir
+        results_dir=results_dir,
+        enable_progressive=True  # Progressive search always enabled
     )
     
     # Restrict search to specific network type if provided

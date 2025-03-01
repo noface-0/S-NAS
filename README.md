@@ -2,6 +2,8 @@
 
 S-NAS is a streamlined system that automates the discovery of optimal neural network architectures for specific datasets. Rather than manually designing neural networks, S-NAS efficiently explores different architecture configurations to find ones that perform best on predefined benchmark datasets.
 
+![screenshot](./images/screenshot.png)
+
 ## Features
 
 - **Evolutionary Search**: Uses genetic algorithms to efficiently explore the architecture space
@@ -130,7 +132,7 @@ To ensure thorough search space coverage:
   - Categorical parameters (activations, etc.) randomly select from available options
   - All mutations respect architectural constraints to ensure validity
 - **Diversity Tracking**: The system quantifies population diversity at each generation:
-  - Calculates Shannon entropy across all architecture parameters
+  - Calculates [Shannon entropy](https://www.sciencedirect.com/topics/engineering/shannon-entropy) across all architecture parameters
   - Monitors distribution of parameter values in the population
   - Tracks diversity metrics over time to detect convergence
   - Logs diversity scores that can be visualized to understand search dynamics
@@ -425,9 +427,13 @@ python examples/example_evaluate.py --architecture output/best_architecture.json
 S-NAS provides several visualization options:
 
 - **Search Progress**: Shows best and average fitness over generations
-- **Architecture Visualization**: Network visualization of the discovered architecture
+- **Network Graph**: Visual representation of the network structure
 - **Training Curves**: Training and validation loss/accuracy curves
 - **Parameter Importance**: Analysis of which parameters contribute most to performance
+
+![screenshot](./images/results.png)
+
+![screenshot](./images/modelsum.png)
 
 ## Exporting Models
 
@@ -438,6 +444,8 @@ python examples/example_evaluate.py --architecture output/best_architecture.json
 ```
 
 This will generate a Python file containing a self-contained PyTorch model that you can use in your own projects.
+
+![screenshot](./images/export.png)
 
 ## Performance Features
 
@@ -539,6 +547,16 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 9. **Expand GPU Management in GUI**
    - Expand GPU selection UI to include more distribution options
    - Implement progress tracking for distributed jobs
+
+10. **Add Docker Support**
+   - Create Dockerfile for containerized deployment
+   - Add docker-compose.yml for easy orchestration
+   - Document container usage in README
+
+11. **Add Automated Tests**
+   - Implement unit tests for core components
+   - Add integration tests for search process
+   - Set up CI pipeline for automated testing
 
 
 

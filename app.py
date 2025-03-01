@@ -26,6 +26,8 @@ except ImportError:
 # Set up logging
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Suppress Streamlit cache warnings
+logging.getLogger('streamlit.runtime.caching').setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 # Import S-NAS components
@@ -225,11 +227,6 @@ def main():
     * **Parameter Sharing** (from ENAS paper): Reuses weights between similar architectures (always enabled)
     * **Progressive Search** (from PNAS paper): Gradually increases architecture complexity (can be toggled)
     
-    ### Note on Progressive Search and MLP Bias
-    When using progressive search with simpler datasets like MNIST, there may be a bias toward MLP architectures
-    in the search results. If you want to explore more CNN architectures on simpler datasets, consider:
-    * Disabling progressive search using the checkbox in the sidebar
-    * Explicitly selecting a network type (like CNN) from the dropdown
     """)
 
     # Sidebar for configuration
@@ -357,7 +354,7 @@ def main():
     enable_progressive = st.sidebar.checkbox("Enable Progressive Search", value=True, 
                         help="Start with simpler architectures and increase complexity over generations. Disable to avoid MLP bias on simple datasets like MNIST.")
     
-    # Checkpoint parameters (new)
+    # Checkpoint parameters 
     st.sidebar.subheader("Checkpoint Management")
     checkpoint_freq = st.sidebar.slider("Checkpoint Frequency (generations)", 0, 10, 2, 
                                       help="Number of generations between checkpoints. Set to 0 to disable.")
@@ -591,6 +588,9 @@ def main():
                     # Add current complexity level to history
                     if search.save_history:
                         search.history['complexity_level'].append(search.complexity_level)
+                elif search.save_history and 'complexity_level' not in search.history:
+                    # Initialize complexity_level key in history for non-progressive search
+                    search.history['complexity_level'] = []
                 
                 # Save checkpoint if needed
                 if checkpoint_freq > 0 and generation > 0 and generation % checkpoint_freq == 0:
@@ -606,7 +606,7 @@ def main():
                         'best_fitness': search.best_fitness if hasattr(search, 'best_fitness') else None,
                         'history': search.history,
                         'generation': generation,
-                        'complexity_level': search.complexity_level,
+                        'complexity_level': search.complexity_level if hasattr(search, 'complexity_level') else None,
                         'dataset_name': selected_dataset
                     }
                     
@@ -689,40 +689,32 @@ def main():
             # Plot best architecture
             st.subheader("Best Architecture")
             
-            # Create tabs for different visualization types
-            vis_tabs = st.tabs(["Network Graph", "PyTorch Model"])
+            # Visualize network graph
+            fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
+            st.pyplot(fig)
             
-            with vis_tabs[0]:
-                fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
-                st.pyplot(fig)
-                
-            with vis_tabs[1]:
-                # Try model visualization with torchviz
-                torch_fig = visualizer.visualize_torch_model(best_architecture, components['model_builder'])
-                st.pyplot(torch_fig)
-                
-                # Add model summary
-                st.subheader("Model Summary")
-                try:
-                    if TORCH_AVAILABLE:
-                        model = components['model_builder'].build_model(best_architecture)
-                        
-                        # Count parameters
-                        total_params = sum(p.numel() for p in model.parameters())
-                        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-                        
-                        # Display summary
-                        st.markdown(f"""
-                        - **Total Parameters**: {total_params:,}
-                        - **Trainable Parameters**: {trainable_params:,}
-                        """)
-                        
-                        # Display model structure
-                        st.code(str(model))
-                    else:
-                        st.warning("PyTorch is not available. Cannot display model summary.")
-                except Exception as e:
-                    st.warning(f"Could not generate model summary: {e}")
+            # Add model summary
+            st.subheader("Model Summary")
+            try:
+                if TORCH_AVAILABLE:
+                    model = components['model_builder'].build_model(best_architecture)
+                    
+                    # Count parameters
+                    total_params = sum(p.numel() for p in model.parameters())
+                    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                    
+                    # Display summary
+                    st.markdown(f"""
+                    - **Total Parameters**: {total_params:,}
+                    - **Trainable Parameters**: {trainable_params:,}
+                    """)
+                    
+                    # Display model structure
+                    st.code(str(model))
+                else:
+                    st.warning("PyTorch is not available. Cannot display model summary.")
+            except Exception as e:
+                st.warning(f"Could not generate model summary: {e}")
 
     # Results tab
     with tab2:
@@ -796,48 +788,34 @@ def main():
             try:
                 st.subheader("Architecture Visualization")
                 
-                # Create tabs for different visualization types
-                vis_tabs = st.tabs(["Network Graph", "PyTorch Model"])
+                # Visualize network graph
+                fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
+                st.pyplot(fig)
                 
-                with vis_tabs[0]:
-                    fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
-                    st.pyplot(fig)
-                    
-                with vis_tabs[1]:
-                    # Try to import the model builder
-                    try:
+                # Add model summary if possible
+                st.subheader("Model Summary")
+                try:
+                    if TORCH_AVAILABLE:
                         from snas.architecture.model_builder import ModelBuilder
                         model_builder = ModelBuilder(device='cpu')
-                        torch_fig = visualizer.visualize_torch_model(best_architecture, model_builder)
-                        st.pyplot(torch_fig)
+                        model = model_builder.build_model(best_architecture)
                         
-                        # Add model summary if possible
-                        st.subheader("Model Summary")
-                        try:
-                            if TORCH_AVAILABLE:
-                                model = model_builder.build_model(best_architecture)
-                                
-                                # Count parameters
-                                total_params = sum(p.numel() for p in model.parameters())
-                                trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-                                
-                                # Display summary
-                                st.markdown(f"""
-                                - **Total Parameters**: {total_params:,}
-                                - **Trainable Parameters**: {trainable_params:,}
-                                """)
-                                
-                                # Display model structure
-                                st.code(str(model))
-                            else:
-                                st.warning("PyTorch is not available. Cannot display model summary.")
-                            
-                        except Exception as e:
-                            st.warning(f"Could not generate model summary: {e}")
+                        # Count parameters
+                        total_params = sum(p.numel() for p in model.parameters())
+                        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
                         
-                    except Exception as e:
-                        st.warning(f"Could not generate PyTorch visualization: {e}")
-                        st.info("Install torchviz with: pip install torchviz")
+                        # Display summary
+                        st.markdown(f"""
+                        - **Total Parameters**: {total_params:,}
+                        - **Trainable Parameters**: {trainable_params:,}
+                        """)
+                        
+                        # Display model structure
+                        st.code(str(model))
+                    else:
+                        st.warning("PyTorch is not available. Cannot display model summary.")
+                except Exception as e:
+                    st.warning(f"Could not generate model summary: {e}")
             except Exception as e:
                 st.error(f"Error generating architecture visualization: {str(e)}")
             
