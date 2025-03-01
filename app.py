@@ -5,10 +5,16 @@ import pickle
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 import streamlit as st
 import multiprocessing
 import logging
+
+# Import torch with error handling
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, 
@@ -146,7 +152,13 @@ def main():
     This application provides an interface for the S-NAS system, which automates the discovery
     of optimal neural network architectures for specific datasets. Rather than manually designing
     neural networks, S-NAS efficiently explores different architecture configurations to find
-    ones that perform best on a predefined benchmark datasets.
+    ones that perform best on predefined benchmark datasets.
+    
+    S-NAS incorporates two advanced efficiency techniques by default:
+    * **Parameter Sharing** (from ENAS paper): Reuses weights between similar architectures
+    * **Progressive Search** (from PNAS paper): Gradually increases architecture complexity
+    
+    These features make the search process significantly more efficient.
     """)
 
     # Sidebar for configuration
@@ -158,14 +170,26 @@ def main():
 
     # Hardware configuration
     st.sidebar.subheader("Hardware")
-    use_gpu = st.sidebar.checkbox("Use GPU", value=torch.cuda.is_available())
-    if use_gpu and torch.cuda.is_available():
-        num_gpus = torch.cuda.device_count()
-        gpu_ids = st.sidebar.multiselect(
-            "Select GPUs", 
-            options=list(range(num_gpus)),
-            default=list(range(min(num_gpus, 2)))
-        )
+    # Check if PyTorch CUDA is available with error handling
+    cuda_available = False
+    if TORCH_AVAILABLE:
+        try:
+            cuda_available = torch.cuda.is_available()
+        except:
+            cuda_available = False
+        
+    use_gpu = st.sidebar.checkbox("Use GPU", value=cuda_available)
+    if use_gpu and cuda_available and TORCH_AVAILABLE:
+        try:
+            num_gpus = torch.cuda.device_count()
+            gpu_ids = st.sidebar.multiselect(
+                "Select GPUs", 
+                options=list(range(num_gpus)),
+                default=list(range(min(num_gpus, 2)))
+            )
+        except Exception as e:
+            st.sidebar.warning(f"Error accessing CUDA: {str(e)}. Falling back to CPU.")
+            gpu_ids = []
     else:
         gpu_ids = []
 
@@ -213,7 +237,7 @@ def main():
     )
 
     # Determine device
-    if use_gpu and torch.cuda.is_available() and gpu_ids:
+    if use_gpu and cuda_available and TORCH_AVAILABLE and gpu_ids:
         device = f"cuda:{gpu_ids[0]}"
     else:
         device = "cpu"
@@ -247,7 +271,7 @@ def main():
                     device
                 )
                 
-                # Create evaluator
+                # Create evaluator with parameter sharing enabled by default
                 evaluator = Evaluator(
                     dataset_registry=components['dataset_registry'],
                     model_builder=components['model_builder'],
@@ -255,7 +279,9 @@ def main():
                     max_epochs=max_epochs,
                     patience=patience,
                     min_delta=min_delta,
-                    monitor=monitor
+                    monitor=monitor,
+                    enable_weight_sharing=True,  # Parameter sharing always enabled
+                    weight_sharing_max_models=100  # Keep up to 100 models in the sharing pool
                 )
                 
                 # Set up job distributor if using multiple GPUs
@@ -271,7 +297,7 @@ def main():
                 else:
                     parallel_evaluator = None
                 
-                # Create evolutionary search
+                # Create evolutionary search with progressive search enabled by default
                 search = EvolutionarySearch(
                     architecture_space=components['architecture_space'],
                     evaluator=evaluator,
@@ -282,7 +308,8 @@ def main():
                     elite_size=2,
                     tournament_size=3,
                     metric=monitor,
-                    save_history=True
+                    save_history=True,
+                    enable_progressive=True  # Progressive search always enabled
                 )
                 
                 # Force specific network type if not "all"
@@ -313,6 +340,18 @@ def main():
                 progress_bar.progress(progress)
                 status_text.text(f"Generation {generation + 1}/{num_generations}")
                 
+                # For progressive search, check if complexity should be increased
+                if search.enable_progressive:
+                    # Update complexity level at transition points
+                    transition_point = (search.complexity_level * num_generations) // (search.max_complexity_level + 1)
+                    if generation >= transition_point and search.complexity_level < search.max_complexity_level:
+                        search.complexity_level += 1
+                        st.text(f"Increasing architecture complexity to level {search.complexity_level}")
+                    
+                    # Add current complexity level to history
+                    if search.save_history:
+                        search.history['complexity_level'].append(search.complexity_level)
+                
                 # Use fast mode for early generations
                 use_fast_mode = generation < fast_mode_gens
                 
@@ -326,6 +365,28 @@ def main():
                 else:
                     # Use standard evaluation
                     search.evaluate_population(fast_mode=use_fast_mode)
+                
+                # Record statistics for this generation
+                if len(search.fitness_scores) > 0:
+                    if search.higher_is_better:
+                        best_fitness = max(search.fitness_scores)
+                        best_idx = search.fitness_scores.index(best_fitness)
+                    else:
+                        best_fitness = min(search.fitness_scores)
+                        best_idx = search.fitness_scores.index(best_fitness)
+                    
+                    avg_fitness = sum(search.fitness_scores) / len(search.fitness_scores)
+                    best_arch = search.population[best_idx].copy()
+                    diversity = search.calculate_diversity()
+                    
+                    # Save history
+                    if search.save_history:
+                        search.history['generations'].append(generation)
+                        search.history['best_fitness'].append(best_fitness)
+                        search.history['avg_fitness'].append(avg_fitness)
+                        search.history['best_architecture'].append(best_arch)
+                        search.history['population_diversity'].append(diversity)
+                        search.history['evaluation_times'].append(0)  # Placeholder for evaluation times
                 
                 # Create next generation (except for last iteration)
                 if generation < num_generations - 1:
@@ -363,8 +424,41 @@ def main():
             
             # Plot best architecture
             st.subheader("Best Architecture")
-            fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
-            st.pyplot(fig)
+            
+            # Create tabs for different visualization types
+            vis_tabs = st.tabs(["Network Graph", "PyTorch Model"])
+            
+            with vis_tabs[0]:
+                fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
+                st.pyplot(fig)
+                
+            with vis_tabs[1]:
+                # Try model visualization with torchviz
+                torch_fig = visualizer.visualize_torch_model(best_architecture, components['model_builder'])
+                st.pyplot(torch_fig)
+                
+                # Add model summary
+                st.subheader("Model Summary")
+                try:
+                    if TORCH_AVAILABLE:
+                        model = components['model_builder'].build_model(best_architecture)
+                        
+                        # Count parameters
+                        total_params = sum(p.numel() for p in model.parameters())
+                        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                        
+                        # Display summary
+                        st.markdown(f"""
+                        - **Total Parameters**: {total_params:,}
+                        - **Trainable Parameters**: {trainable_params:,}
+                        """)
+                        
+                        # Display model structure
+                        st.code(str(model))
+                    else:
+                        st.warning("PyTorch is not available. Cannot display model summary.")
+                except Exception as e:
+                    st.warning(f"Could not generate model summary: {e}")
 
     # Results tab
     with tab2:
@@ -385,6 +479,13 @@ def main():
                     
                     # Create visualizer
                     visualizer = SearchVisualizer()
+                    
+                    # Add debug button
+                    if st.checkbox("Debug History Data"):
+                        st.subheader("History Data Debug")
+                        debug_fig = visualizer.debug_history_data(history)
+                        st.pyplot(debug_fig)
+                        
                 except Exception as e:
                     st.error(f"Error loading results: {str(e)}")
                     st.info("The selected result file might be corrupted or in an incompatible format.")
@@ -430,8 +531,49 @@ def main():
             # Plot architecture
             try:
                 st.subheader("Architecture Visualization")
-                fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
-                st.pyplot(fig)
+                
+                # Create tabs for different visualization types
+                vis_tabs = st.tabs(["Network Graph", "PyTorch Model"])
+                
+                with vis_tabs[0]:
+                    fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
+                    st.pyplot(fig)
+                    
+                with vis_tabs[1]:
+                    # Try to import the model builder
+                    try:
+                        from snas.architecture.model_builder import ModelBuilder
+                        model_builder = ModelBuilder(device='cpu')
+                        torch_fig = visualizer.visualize_torch_model(best_architecture, model_builder)
+                        st.pyplot(torch_fig)
+                        
+                        # Add model summary if possible
+                        st.subheader("Model Summary")
+                        try:
+                            if TORCH_AVAILABLE:
+                                model = model_builder.build_model(best_architecture)
+                                
+                                # Count parameters
+                                total_params = sum(p.numel() for p in model.parameters())
+                                trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                                
+                                # Display summary
+                                st.markdown(f"""
+                                - **Total Parameters**: {total_params:,}
+                                - **Trainable Parameters**: {trainable_params:,}
+                                """)
+                                
+                                # Display model structure
+                                st.code(str(model))
+                            else:
+                                st.warning("PyTorch is not available. Cannot display model summary.")
+                            
+                        except Exception as e:
+                            st.warning(f"Could not generate model summary: {e}")
+                        
+                    except Exception as e:
+                        st.warning(f"Could not generate PyTorch visualization: {e}")
+                        st.info("Install torchviz with: pip install torchviz")
             except Exception as e:
                 st.error(f"Error generating architecture visualization: {str(e)}")
             
