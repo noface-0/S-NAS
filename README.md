@@ -11,16 +11,16 @@ S-NAS is a streamlined system that automates the discovery of optimal neural net
 - **Evolutionary Search**: Uses genetic algorithms to efficiently explore the architecture space
 - **Multiple Neural Network Types**: Supports CNNs, MLPs, ResNets, and MobileNets
 - **Multiple Datasets**: Works with standard datasets:
-  - CIFAR-10 & CIFAR-100 (32×32 RGB images)
-  - SVHN (Street View House Numbers, 32×32 RGB images)
-  - MNIST (handwritten digits, 28×28 grayscale images)
-  - KMNIST (Japanese characters, 28×28 grayscale images)
-  - QMNIST (extended MNIST, 28×28 grayscale images)
-  - EMNIST (extended MNIST with letters, 28×28 grayscale images)
-  - Fashion-MNIST (fashion items, 28×28 grayscale images)
-  - STL-10 (higher resolution object images, 96×96 RGB images)
-  - DTD (Describable Textures Dataset, 47 texture categories)
-  - GTSRB (German Traffic Sign Recognition Benchmark, 43 traffic sign classes)
+  - [CIFAR-10 & CIFAR-100](https://www.cs.toronto.edu/~kriz/cifar.html) (32×32 RGB images)
+  - [SVHN](http://ufldl.stanford.edu/housenumbers/) (Street View House Numbers, 32×32 RGB images)
+  - [MNIST](http://yann.lecun.com/exdb/mnist/) (handwritten digits, 28×28 grayscale images)
+  - [KMNIST](https://github.com/rois-codh/kmnist) (Japanese characters, 28×28 grayscale images)
+  - [QMNIST](https://github.com/facebookresearch/qmnist) (extended MNIST, 28×28 grayscale images)
+  - [EMNIST](https://www.nist.gov/itl/products-and-services/emnist-dataset) (extended MNIST with letters, 28×28 grayscale images)
+  - [Fashion-MNIST](https://github.com/zalandoresearch/fashion-mnist) (fashion items, 28×28 grayscale images)
+  - [STL-10](https://cs.stanford.edu/~acoates/stl10/) (higher resolution object images, 96×96 RGB images)
+  - [DTD](https://www.robots.ox.ac.uk/~vgg/data/dtd/) (Describable Textures Dataset, 47 texture categories)
+  - [GTSRB](https://benchmark.ini.rub.de/gtsrb_dataset.html) (German Traffic Sign Recognition Benchmark, 43 traffic sign classes)
 - **Custom Dataset Support**:
   - CSV-based datasets with image paths and labels
   - Folder-based image datasets with class subfolders
