@@ -2,12 +2,19 @@ import os
 import time
 import json
 import pickle
-import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 import multiprocessing
 import logging
+
+# Import pandas with error handling
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+    logging.warning("Pandas not available. Some visualizations will be limited.")
 
 # Import torch with error handling
 try:
@@ -89,7 +96,7 @@ def load_search_results(filename):
         # Catch-all for unexpected errors
         raise Exception(f"Unexpected error loading search results: {str(e)}")
 
-@st.cache_resource
+@st.cache_data
 def get_available_datasets():
     """Get list of available datasets without loading them."""
     return [
@@ -108,37 +115,97 @@ def get_result_files():
     return [f.split("_history.pkl")[0] for f in os.listdir(RESULTS_DIR) 
            if f.endswith("_history.pkl")]
 
-@st.cache_resource
-def initialize_components(dataset_name, batch_size, num_workers, pin_memory, _gpu_ids, device):
+def initialize_components(dataset_name, batch_size, num_workers, pin_memory, _gpu_ids, device, 
+                          custom_dataset_params=None):
     """Initialize components for a specific dataset."""
     logger.info(f"Initializing components for dataset: {dataset_name}")
     
-    # Create dataset registry (but don't load datasets yet)
-    dataset_registry = DatasetRegistry(
-        data_dir='./data',
-        batch_size=batch_size,
-        num_workers=num_workers,
-        pin_memory=pin_memory
-    )
-    
-    # Get dataset configuration
-    dataset_config = dataset_registry.get_dataset_config(dataset_name)
-    
-    # Create architecture space
-    architecture_space = ArchitectureSpace(
-        input_shape=dataset_config["input_shape"],
-        num_classes=dataset_config["num_classes"]
-    )
-    
-    # Create model builder
-    model_builder = ModelBuilder(device=device)
-    
-    return {
-        'dataset_registry': dataset_registry,
-        'architecture_space': architecture_space,
-        'model_builder': model_builder,
-        'dataset_config': dataset_config
-    }
+    try:
+        # Create dataset registry (but don't load datasets yet)
+        dataset_registry = DatasetRegistry(
+            data_dir='./data',
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory
+        )
+        
+        # Handle custom datasets
+        if custom_dataset_params and dataset_name.startswith("custom_"):
+            logger.info(f"Setting up custom dataset: {dataset_name}")
+            
+            try:
+                # Parse image size
+                image_size = custom_dataset_params.get('image_size', '224x224')
+                width, height = map(int, image_size.split('x'))
+                
+                if custom_dataset_params['type'] == 'folder':
+                    # Register folder-based dataset
+                    folder_path = custom_dataset_params['folder_path']
+                    logger.info(f"Registering folder dataset from: {folder_path}")
+                    
+                    dataset_config = dataset_registry.register_folder_dataset(
+                        folder_path=folder_path,
+                        dataset_name=dataset_name,
+                        image_size=(height, width)
+                    )
+                else:  # CSV file
+                    # Register CSV-based dataset
+                    csv_path = custom_dataset_params['csv_path']
+                    image_col = custom_dataset_params['image_column']
+                    label_col = custom_dataset_params['label_column']
+                    
+                    logger.info(f"Registering CSV dataset from: {csv_path}")
+                    logger.info(f"  Image column: {image_col}, Label column: {label_col}")
+                    
+                    dataset_config = dataset_registry.register_csv_dataset(
+                        csv_path=csv_path,
+                        dataset_name=dataset_name,
+                        image_column=image_col,
+                        label_column=label_col,
+                        image_size=(height, width)
+                    )
+                    
+                logger.info(f"Successfully registered custom dataset with {dataset_config['num_classes']} classes")
+                
+            except Exception as e:
+                # Provide detailed error message for custom dataset setup
+                error_msg = f"Error setting up custom dataset: {str(e)}"
+                logger.error(error_msg)
+                st.error(error_msg)
+                
+                # Fall back to a default dataset
+                dataset_name = "mnist"  # Fallback to a simple dataset
+                st.warning(f"Falling back to {dataset_name} dataset due to error in custom dataset setup")
+                dataset_config = dataset_registry.get_dataset_config(dataset_name)
+        else:
+            # Get configuration for built-in dataset
+            logger.info(f"Using built-in dataset: {dataset_name}")
+            dataset_config = dataset_registry.get_dataset_config(dataset_name)
+        
+        # Create architecture space
+        architecture_space = ArchitectureSpace(
+            input_shape=dataset_config["input_shape"],
+            num_classes=dataset_config["num_classes"]
+        )
+        
+        # Create model builder
+        model_builder = ModelBuilder(device=device)
+        
+        return {
+            'dataset_registry': dataset_registry,
+            'architecture_space': architecture_space,
+            'model_builder': model_builder,
+            'dataset_config': dataset_config
+        }
+        
+    except Exception as e:
+        # Comprehensive error handling
+        error_msg = f"Error initializing components: {str(e)}"
+        logger.error(error_msg)
+        st.error(error_msg)
+        
+        # Raise the exception to propagate it
+        raise
 
 def main():
     """Main function containing all Streamlit UI code."""
@@ -154,19 +221,107 @@ def main():
     neural networks, S-NAS efficiently explores different architecture configurations to find
     ones that perform best on predefined benchmark datasets.
     
-    S-NAS incorporates two advanced efficiency techniques by default:
-    * **Parameter Sharing** (from ENAS paper): Reuses weights between similar architectures
-    * **Progressive Search** (from PNAS paper): Gradually increases architecture complexity
+    S-NAS incorporates two advanced efficiency techniques:
+    * **Parameter Sharing** (from ENAS paper): Reuses weights between similar architectures (always enabled)
+    * **Progressive Search** (from PNAS paper): Gradually increases architecture complexity (can be toggled)
     
-    These features make the search process significantly more efficient.
+    ### Note on Progressive Search and MLP Bias
+    When using progressive search with simpler datasets like MNIST, there may be a bias toward MLP architectures
+    in the search results. If you want to explore more CNN architectures on simpler datasets, consider:
+    * Disabling progressive search using the checkbox in the sidebar
+    * Explicitly selecting a network type (like CNN) from the dropdown
     """)
 
     # Sidebar for configuration
     st.sidebar.header("Configuration")
 
-    # Dataset selection - use the cached function to avoid loading datasets
-    dataset_options = get_available_datasets()
-    selected_dataset = st.sidebar.selectbox("Dataset", dataset_options)
+    # Dataset selection group
+    dataset_tab1, dataset_tab2 = st.sidebar.tabs(["Built-in Datasets", "Custom Dataset"])
+    
+    with dataset_tab1:
+        # Built-in dataset selection
+        dataset_options = get_available_datasets()
+        selected_dataset = st.selectbox("Select Dataset", dataset_options)
+        use_custom_dataset = False
+    
+    with dataset_tab2:
+        # Custom dataset options
+        st.header("Custom Dataset")
+        custom_dataset_type = st.radio("Dataset Type", ["Folder Structure", "CSV File"])
+        
+        if custom_dataset_type == "Folder Structure":
+            custom_folder_path = st.text_input("Dataset Folder Path", 
+                                              help="Path to a folder with class subfolders. Each subfolder should contain images of that class.")
+            custom_dataset_name = st.text_input("Dataset Name", "custom_dataset")
+            
+            # Preview button
+            if st.button("Validate Folder Structure"):
+                if os.path.exists(custom_folder_path):
+                    subfolders = [f for f in os.listdir(custom_folder_path) 
+                                 if os.path.isdir(os.path.join(custom_folder_path, f))]
+                    if subfolders:
+                        st.success(f"Found {len(subfolders)} class folders: {', '.join(subfolders[:5])}" + 
+                                 ("..." if len(subfolders) > 5 else ""))
+                    else:
+                        st.error("No class subfolders found in the specified directory.")
+                else:
+                    st.error("The specified folder path does not exist.")
+                    
+            use_custom_dataset = st.checkbox("Use This Custom Dataset")
+            
+        else:  # CSV File
+            custom_csv_path = st.text_input("CSV File Path",
+                                          help="Path to a CSV file with image paths and labels.")
+            custom_dataset_name = st.text_input("Dataset Name", "custom_dataset")
+            image_column = st.text_input("Image Column Name", "image")
+            label_column = st.text_input("Label Column Name", "label")
+            
+            # Preview button
+            if st.button("Validate CSV File"):
+                if os.path.exists(custom_csv_path) and custom_csv_path.endswith('.csv'):
+                    try:
+                        import pandas as pd
+                        df = pd.read_csv(custom_csv_path)
+                        if image_column in df.columns and label_column in df.columns:
+                            unique_labels = df[label_column].unique()
+                            st.success(f"Valid CSV file. Found {len(unique_labels)} unique classes.")
+                            st.write(f"Sample data: {df.head(3)}")
+                        else:
+                            missing_cols = []
+                            if image_column not in df.columns:
+                                missing_cols.append(image_column)
+                            if label_column not in df.columns:
+                                missing_cols.append(label_column)
+                            st.error(f"Column(s) not found in CSV: {', '.join(missing_cols)}")
+                            st.write(f"Available columns: {', '.join(df.columns)}")
+                    except Exception as e:
+                        st.error(f"Error reading CSV file: {str(e)}")
+                else:
+                    st.error("The specified file does not exist or is not a CSV file.")
+                    
+            use_custom_dataset = st.checkbox("Use This Custom Dataset")
+        
+        # Common custom dataset settings
+        image_size = st.text_input("Image Size (WxH)", "224x224", 
+                                 help="Format: widthxheight, e.g., 224x224")
+        
+    # Determine which dataset to use
+    if use_custom_dataset:
+        # Use custom dataset
+        if custom_dataset_type == "Folder Structure":
+            if not os.path.exists(custom_folder_path):
+                st.sidebar.error("The specified folder path does not exist!")
+                selected_dataset = dataset_options[0]  # Fallback to default
+            else:
+                selected_dataset = "custom_" + custom_dataset_name
+                # We'll handle this case specially when initializing components
+        else:  # CSV File
+            if not os.path.exists(custom_csv_path) or not custom_csv_path.endswith('.csv'):
+                st.sidebar.error("The specified CSV file does not exist or is not a CSV file!")
+                selected_dataset = dataset_options[0]  # Fallback to default
+            else:
+                selected_dataset = "custom_" + custom_dataset_name
+                # We'll handle this case specially when initializing components
 
     # Hardware configuration
     st.sidebar.subheader("Hardware")
@@ -199,6 +354,22 @@ def main():
     num_generations = st.sidebar.slider("Number of Generations", 5, 50, 10)
     mutation_rate = st.sidebar.slider("Mutation Rate", 0.1, 0.5, 0.2, 0.05)
     fast_mode_gens = st.sidebar.slider("Fast Evaluation Generations", 0, 5, 2)
+    enable_progressive = st.sidebar.checkbox("Enable Progressive Search", value=True, 
+                        help="Start with simpler architectures and increase complexity over generations. Disable to avoid MLP bias on simple datasets like MNIST.")
+    
+    # Checkpoint parameters (new)
+    st.sidebar.subheader("Checkpoint Management")
+    checkpoint_freq = st.sidebar.slider("Checkpoint Frequency (generations)", 0, 10, 2, 
+                                      help="Number of generations between checkpoints. Set to 0 to disable.")
+    
+    # List available checkpoints
+    checkpoint_files = [f for f in os.listdir(RESULTS_DIR) if f.endswith('.pkl') and 'checkpoint' in f]
+    checkpoint_options = ["None"] + checkpoint_files
+    selected_checkpoint = st.sidebar.selectbox(
+        "Resume From Checkpoint", 
+        options=checkpoint_options,
+        help="Select a checkpoint file to resume search from"
+    )
 
     # Network type selection
     st.sidebar.subheader("Network Architecture")
@@ -258,18 +429,61 @@ def main():
         - **Hardware**: {"GPU" if use_gpu else "CPU"}
         """)
         
+        # Status indicators for errors
+        error_placeholder = st.empty()
+        info_placeholder = st.empty()
+        
+        # Display custom dataset info if using one
+        if use_custom_dataset and selected_dataset.startswith("custom_"):
+            if custom_dataset_type == "Folder Structure":
+                info_placeholder.info(f"Using custom dataset from folder: {custom_folder_path}")
+            else:
+                info_placeholder.info(f"Using custom dataset from CSV: {custom_csv_path}")
+            
+        # Display checkpoint info if using one
+        if selected_checkpoint != "None":
+            info_placeholder.info(f"Will resume search from checkpoint: {selected_checkpoint}")
+        
         # Start search button
         if st.button("Start Search"):
+            # Clear any previous messages
+            error_placeholder.empty()
+            info_placeholder.empty()
+            
             with st.spinner("Initializing components..."):
-                # Initialize components only when needed
-                components = initialize_components(
-                    selected_dataset, 
-                    batch_size, 
-                    num_workers, 
-                    use_gpu and torch.cuda.is_available(),
-                    gpu_ids,
-                    device
-                )
+                # Prepare custom dataset parameters if needed
+                custom_dataset_params = None
+                if use_custom_dataset and selected_dataset.startswith("custom_"):
+                    if custom_dataset_type == "Folder Structure":
+                        custom_dataset_params = {
+                            'type': 'folder',
+                            'folder_path': custom_folder_path,
+                            'image_size': image_size
+                        }
+                    else:  # CSV File
+                        custom_dataset_params = {
+                            'type': 'csv',
+                            'csv_path': custom_csv_path,
+                            'image_column': image_column,
+                            'label_column': label_column,
+                            'image_size': image_size
+                        }
+                
+                try:
+                    # Initialize components only when needed
+                    components = initialize_components(
+                        selected_dataset, 
+                        batch_size, 
+                        num_workers, 
+                        use_gpu and torch.cuda.is_available(),
+                        gpu_ids,
+                        device,
+                        custom_dataset_params
+                    )
+                except Exception as e:
+                    # Display error and exit
+                    error_placeholder.error(f"Failed to initialize search components: {str(e)}")
+                    return
                 
                 # Create evaluator with parameter sharing enabled by default
                 evaluator = Evaluator(
@@ -297,20 +511,46 @@ def main():
                 else:
                     parallel_evaluator = None
                 
-                # Create evolutionary search with progressive search enabled by default
-                search = EvolutionarySearch(
-                    architecture_space=components['architecture_space'],
-                    evaluator=evaluator,
-                    dataset_name=selected_dataset,
-                    population_size=population_size,
-                    mutation_rate=mutation_rate,
-                    generations=num_generations,
-                    elite_size=2,
-                    tournament_size=3,
-                    metric=monitor,
-                    save_history=True,
-                    enable_progressive=True  # Progressive search always enabled
-                )
+                # Check if resuming from checkpoint
+                if selected_checkpoint != "None":
+                    checkpoint_path = os.path.join(RESULTS_DIR, selected_checkpoint)
+                    st.info(f"Resuming search from checkpoint: {selected_checkpoint}")
+                    
+                    # Load checkpoint data
+                    with open(checkpoint_path, 'rb') as f:
+                        checkpoint_data = pickle.load(f)
+                    
+                    # Create search object with checkpoint data
+                    search = EvolutionarySearch(
+                        architecture_space=components['architecture_space'],
+                        evaluator=evaluator,
+                        dataset_name=selected_dataset,
+                        population_size=population_size,
+                        mutation_rate=mutation_rate,
+                        generations=num_generations,
+                        elite_size=2,
+                        tournament_size=3,
+                        metric=monitor,
+                        save_history=True,
+                        enable_progressive=enable_progressive,
+                        checkpoint_data=checkpoint_data  # Provide checkpoint data
+                    )
+                else:
+                    # Create new evolutionary search with user-selected progressive search setting
+                    search = EvolutionarySearch(
+                        architecture_space=components['architecture_space'],
+                        evaluator=evaluator,
+                        dataset_name=selected_dataset,
+                        population_size=population_size,
+                        mutation_rate=mutation_rate,
+                        generations=num_generations,
+                        elite_size=2,
+                        tournament_size=3,
+                        metric=monitor,
+                        save_history=True,
+                        enable_progressive=enable_progressive,  # User-controlled progressive search
+                        checkpoint_frequency=checkpoint_freq  # Save checkpoints periodically
+                    )
                 
                 # Force specific network type if not "all"
                 if network_type != "all":
@@ -351,6 +591,30 @@ def main():
                     # Add current complexity level to history
                     if search.save_history:
                         search.history['complexity_level'].append(search.complexity_level)
+                
+                # Save checkpoint if needed
+                if checkpoint_freq > 0 and generation > 0 and generation % checkpoint_freq == 0:
+                    timestamp = time.strftime("%Y%m%d-%H%M%S")
+                    checkpoint_filename = f"{selected_dataset}_checkpoint_gen{generation}_{timestamp}.pkl"
+                    checkpoint_path = os.path.join(RESULTS_DIR, checkpoint_filename)
+                    
+                    # Create checkpoint data
+                    checkpoint_data = {
+                        'population': search.population,
+                        'fitness_scores': search.fitness_scores,
+                        'best_architecture': search.best_architecture if hasattr(search, 'best_architecture') else None,
+                        'best_fitness': search.best_fitness if hasattr(search, 'best_fitness') else None,
+                        'history': search.history,
+                        'generation': generation,
+                        'complexity_level': search.complexity_level,
+                        'dataset_name': selected_dataset
+                    }
+                    
+                    # Save checkpoint
+                    with open(checkpoint_path, 'wb') as f:
+                        pickle.dump(checkpoint_data, f)
+                    
+                    status_text.text(f"Checkpoint saved at generation {generation} to {checkpoint_filename}")
                 
                 # Use fast mode for early generations
                 use_fast_mode = generation < fast_mode_gens
@@ -593,41 +857,124 @@ def main():
             try:
                 st.subheader("Architecture Details")
                 
-                # Convert architecture to DataFrame for better display
-                arch_df = pd.DataFrame()
+                # Check if pandas is available
+                if not PANDAS_AVAILABLE:
+                    st.warning("Pandas is not available. Using simplified architecture view.")
+                    
+                    # Simple display without pandas DataFrames
+                    network_type = best_architecture.get('network_type', 'unknown')
+                    st.markdown(f"**Network Type**: {network_type}")
+                    
+                    # Display layer information based on network type
+                    st.markdown("### Layer Information:")
+                    
+                    # CNN, ResNet, MobileNet, and other CNN-based architectures
+                    if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
+                        for i in range(best_architecture.get('num_layers', 0)):
+                            layer_info = []
+                            if 'filters' in best_architecture and i < len(best_architecture['filters']):
+                                layer_info.append(f"Filters: {best_architecture['filters'][i]}")
+                            if 'kernel_sizes' in best_architecture and i < len(best_architecture['kernel_sizes']):
+                                layer_info.append(f"Kernel Size: {best_architecture['kernel_sizes'][i]}")
+                            if 'activations' in best_architecture and i < len(best_architecture['activations']):
+                                layer_info.append(f"Activation: {best_architecture['activations'][i]}")
+                            if 'use_skip_connections' in best_architecture and i < len(best_architecture['use_skip_connections']):
+                                layer_info.append(f"Skip Connection: {'Yes' if best_architecture['use_skip_connections'][i] else 'No'}")
+                                
+                            if layer_info:
+                                st.markdown(f"**Layer {i+1}**: {', '.join(layer_info)}")
+                                
+                    # MLP and Enhanced MLP
+                    elif network_type in ['mlp', 'enhanced_mlp']:
+                        for i in range(best_architecture.get('num_layers', 0)):
+                            layer_info = []
+                            if 'hidden_units' in best_architecture and i < len(best_architecture['hidden_units']):
+                                layer_info.append(f"Hidden Units: {best_architecture['hidden_units'][i]}")
+                            if 'activations' in best_architecture and i < len(best_architecture['activations']):
+                                layer_info.append(f"Activation: {best_architecture['activations'][i]}")
+                                
+                            if layer_info:
+                                st.markdown(f"**Layer {i+1}**: {', '.join(layer_info)}")
                 
-                # Layer information based on network type
-                network_type = best_architecture.get('network_type', 'unknown')
-                
-                # CNN, ResNet, MobileNet, and other CNN-based architectures
-                if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
-                    if 'filters' in best_architecture:
-                        arch_df['Filters'] = best_architecture['filters']
-                    if 'kernel_sizes' in best_architecture:
-                        arch_df['Kernel Size'] = best_architecture['kernel_sizes']
-                    if 'activations' in best_architecture:
-                        arch_df['Activation'] = best_architecture['activations']
-                    if 'use_skip_connections' in best_architecture:
-                        arch_df['Skip Connection'] = [
-                            "Yes" if x else "No" 
-                            for x in best_architecture['use_skip_connections']
-                        ]
-                
-                # MLP and Enhanced MLP
-                elif network_type in ['mlp', 'enhanced_mlp']:
-                    if 'hidden_units' in best_architecture:
-                        arch_df['Hidden Units'] = best_architecture['hidden_units']
-                    if 'activations' in best_architecture:
-                        arch_df['Activation'] = best_architecture['activations']
-                        
-                # Add layer names
-                if not arch_df.empty:
-                    arch_df.index = [f"Layer {i+1}" for i in range(len(arch_df))]
-                
-                    # Display the DataFrame
-                    st.dataframe(arch_df)
                 else:
-                    st.info("No layer-specific parameters found in this architecture")
+                    try:
+                        # Import pandas locally to avoid global import issues
+                        import pandas as pd
+                        
+                        # Use pandas DataFrame for better display
+                        arch_df = pd.DataFrame()
+                        
+                        # Layer information based on network type
+                        network_type = best_architecture.get('network_type', 'unknown')
+                        
+                        # CNN, ResNet, MobileNet, and other CNN-based architectures
+                        if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
+                            if 'filters' in best_architecture:
+                                arch_df['Filters'] = best_architecture['filters']
+                            if 'kernel_sizes' in best_architecture:
+                                arch_df['Kernel Size'] = best_architecture['kernel_sizes']
+                            if 'activations' in best_architecture:
+                                arch_df['Activation'] = best_architecture['activations']
+                            if 'use_skip_connections' in best_architecture:
+                                arch_df['Skip Connection'] = [
+                                    "Yes" if x else "No" 
+                                    for x in best_architecture['use_skip_connections']
+                                ]
+                        
+                        # MLP and Enhanced MLP
+                        elif network_type in ['mlp', 'enhanced_mlp']:
+                            if 'hidden_units' in best_architecture:
+                                arch_df['Hidden Units'] = best_architecture['hidden_units']
+                            if 'activations' in best_architecture:
+                                arch_df['Activation'] = best_architecture['activations']
+                                
+                        # Add layer names
+                        if not arch_df.empty:
+                            arch_df.index = [f"Layer {i+1}" for i in range(len(arch_df))]
+                        
+                            # Display the DataFrame
+                            st.dataframe(arch_df)
+                        else:
+                            st.info("No layer-specific parameters found in this architecture")
+                            
+                    except ImportError:
+                        # If pandas import fails here, fallback to the simpler view
+                        st.warning("Pandas is not available. Using simplified architecture view.")
+                        
+                        # Simple display without pandas DataFrames
+                        network_type = best_architecture.get('network_type', 'unknown')
+                        st.markdown(f"**Network Type**: {network_type}")
+                        
+                        # Display layer information based on network type using the same code as above
+                        st.markdown("### Layer Information:")
+                        
+                        # Just re-use the same code as the fallback display above
+                        if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
+                            for i in range(best_architecture.get('num_layers', 0)):
+                                layer_info = []
+                                if 'filters' in best_architecture and i < len(best_architecture['filters']):
+                                    layer_info.append(f"Filters: {best_architecture['filters'][i]}")
+                                if 'kernel_sizes' in best_architecture and i < len(best_architecture['kernel_sizes']):
+                                    layer_info.append(f"Kernel Size: {best_architecture['kernel_sizes'][i]}")
+                                if 'activations' in best_architecture and i < len(best_architecture['activations']):
+                                    layer_info.append(f"Activation: {best_architecture['activations'][i]}")
+                                if 'use_skip_connections' in best_architecture and i < len(best_architecture['use_skip_connections']):
+                                    layer_info.append(f"Skip Connection: {'Yes' if best_architecture['use_skip_connections'][i] else 'No'}")
+                                    
+                                if layer_info:
+                                    st.markdown(f"**Layer {i+1}**: {', '.join(layer_info)}")
+                                    
+                        # MLP and Enhanced MLP
+                        elif network_type in ['mlp', 'enhanced_mlp']:
+                            for i in range(best_architecture.get('num_layers', 0)):
+                                layer_info = []
+                                if 'hidden_units' in best_architecture and i < len(best_architecture['hidden_units']):
+                                    layer_info.append(f"Hidden Units: {best_architecture['hidden_units'][i]}")
+                                if 'activations' in best_architecture and i < len(best_architecture['activations']):
+                                    layer_info.append(f"Activation: {best_architecture['activations'][i]}")
+                                    
+                                if layer_info:
+                                    st.markdown(f"**Layer {i+1}**: {', '.join(layer_info)}")
                 
                 # Global parameters
                 st.subheader("Global Parameters")
@@ -657,8 +1004,12 @@ def main():
                     for param in ['use_residual', 'use_layer_norm']:
                         if param in best_architecture:
                             global_params[param] = best_architecture[param]
-                        
-                st.json(global_params)
+                
+                # Display the global parameters
+                if global_params:
+                    st.json(global_params)
+                else:
+                    st.info("No global parameters found in this architecture")
             except Exception as e:
                 st.error(f"Error displaying architecture details: {str(e)}")
         else:
@@ -718,7 +1069,7 @@ class BestModel(nn.Module):
 """
                     for i in range(best_architecture['num_layers']):
                         if i < len(hidden_units):
-                            input_dim = input_size if i == 0 else hidden_units[i-1]
+                            input_dim = best_architecture['input_shape'][0] * best_architecture['input_shape'][1] * best_architecture['input_shape'][2] if i == 0 else hidden_units[i-1]
                             output_dim = hidden_units[i]
                             code += f"        self.fc{i+1} = nn.Linear({input_dim}, {output_dim})\n"
                     

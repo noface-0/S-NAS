@@ -101,6 +101,23 @@ Progressive complexity growth makes exploration more efficient:
   - Layer configurations (filters, kernel sizes, etc.)
   - Advanced features (skip connections, normalization, etc.)
 
+ **Note on Progressive Search and MLP Bias**
+
+  When using progressive search with datasets like MNIST, you may notice a bias toward MLP architectures in the search results. This occurs because:
+
+  1. Progressive search starts with simpler architectures and gradually increases complexity
+  2. For grayscale, low-resolution datasets like MNIST, MLPs can achieve good accuracy early in the search
+  3. Once MLPs dominate the early population, evolutionary pressure tends to maintain this architecture type
+
+  If you want to explore a wider variety of architectures (especially CNNs) on simpler datasets, consider:
+  - Disabling progressive search with --enable-progressive=False
+  - Explicitly selecting a network type with --network-type cnn
+  - Running more generations to allow the search to explore more complex architectures
+
+  For complex image datasets like CIFAR-10, this bias is less pronounced as CNNs have a natural advantage over MLPs.
+
+  ---
+
 ### Exploration Strategies
 
 To ensure thorough search space coverage:

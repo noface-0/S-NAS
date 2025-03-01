@@ -128,7 +128,12 @@ def parse_args():
         action='store_true',
         help='Compute extended metrics (precision, recall, F1, etc.)')
 
-    # Parameter sharing and progressive search are now enabled by default
+    # Parameter sharing is enabled by default, progressive search can be toggled
+    parser.add_argument(
+        '--enable-progressive',
+        action='store_true',
+        default=True,
+        help='Enable progressive search (starting with simpler architectures)')
     parser.add_argument(
         '--weight-sharing-max-models',
         type=int,
@@ -384,7 +389,7 @@ def run_search(args, components, experiment_name, results_dir, models_dir):
     """Run the neural architecture search process."""
     logger.info(f"Starting search experiment: {experiment_name}")
 
-    # Create evolutionary search with progressive search always enabled
+    # Create evolutionary search with user-selected progressive search setting
     search = EvolutionarySearch(
         architecture_space=components['architecture_space'],
         evaluator=components['evaluator'],
@@ -399,7 +404,7 @@ def run_search(args, components, experiment_name, results_dir, models_dir):
         checkpoint_frequency=args.checkpoint_frequency,  # Use the command-line argument
         output_dir=args.output_dir,
         results_dir=results_dir,
-        enable_progressive=True  # Always enable progressive search
+        enable_progressive=args.enable_progressive  # User-controlled progressive search
     )
 
     # Force specific network type if specified
