@@ -22,7 +22,6 @@ S-NAS is a streamlined system that automates the discovery of optimal neural net
   - Folder-based image datasets with class subfolders
 - **Advanced Metrics**: Computes precision, recall, F1, confusion matrices, and ROC curves
 - **Model Export**: Exports models to ONNX, TorchScript, quantized, and mobile formats
-- **Robust Error Handling**: Comprehensive exception system for better debugging and reliability
 - **Checkpoint System**: Automatic state saving and recovery for long-running searches
 - **Distributed Evaluation**: Distributes model training across multiple GPUs
 - **Visualization**: Provides rich visualizations of search progress and architecture performance
@@ -30,14 +29,124 @@ S-NAS is a streamlined system that automates the discovery of optimal neural net
 
 ## How It Works
 
-S-NAS uses an evolutionary approach to neural architecture search:
+S-NAS combines evolutionary algorithms with advanced optimization techniques for efficient neural architecture search:
 
-1. **Initialization**: Creates a population of random architecture configurations
-2. **Evaluation**: Trains and evaluates each architecture on the target dataset
-3. **Selection**: Selects the better-performing architectures as parents
-4. **Evolution**: Creates a new generation through crossover and mutation
-5. **Iteration**: Repeats the process for multiple generations
-6. **Export**: Provides the best-discovered architecture for practical use
+### Core Search Algorithm
+
+The search process follows these steps:
+
+1. **Initialization**:
+   - Creates a population of random architecture configurations
+   - Each architecture is defined by parameters like network type, layers, filters, activations, etc.
+   - Initial architectures follow a progressive complexity approach (starting simpler)
+
+2. **Evaluation**:
+   - Trains and evaluates each architecture on the target dataset
+   - Uses parameter sharing to avoid training from scratch when possible
+   - Records performance metrics (validation accuracy, loss) as fitness scores
+   - Caches results to avoid re-evaluating identical architectures
+
+3. **Selection**:
+   - Uses tournament selection to choose parent architectures
+   - Better-performing architectures have higher chances of being selected
+   - Elite preservation keeps the best architectures unchanged across generations
+
+4. **Evolution**:
+   - Creates new architectures through crossover (combining parts of parent architectures)
+   - Applies controlled random mutations to introduce diversity
+   - Mutation rates are adjustable and target different aspects of the architecture
+   - Progressive complexity constraints ensure appropriate architecture scale
+
+5. **Iteration**:
+   - Repeats the process for multiple generations
+   - Complexity gradually increases as search progresses
+   - Weight sharing becomes more effective as the pool of trained models grows
+   - Population diversity is monitored to prevent premature convergence
+
+6. **Export**:
+   - Returns the best-discovered architecture after all generations
+   - Can export to multiple model formats (ONNX, TorchScript, etc.)
+
+### Parameter Sharing (ENAS)
+
+Parameter sharing significantly speeds up evaluation:
+
+- Maintains pools of trained weights for each network type
+- When evaluating a new architecture:
+  1. Calculates similarity scores with previously trained architectures
+  2. Selects the most compatible weights based on architectural similarity and performance
+  3. Transfers weights where layer shapes match
+  4. Initializes random weights only for incompatible layers
+  5. Rebuilds optimizer state for the combined model
+- Prioritizes high-performing models in the sharing pool
+- Separate pools are maintained for different network types (CNN, MLP, etc.)
+
+### Progressive Search (PNAS)
+
+Progressive complexity growth makes exploration more efficient:
+
+- Defines three complexity levels for architectures:
+  - **Level 1**: 2-3 layers, basic network types (CNN, MLP), simple components
+  - **Level 2**: 3-5 layers, more network types (ResNet, Enhanced MLP), moderate complexity
+  - **Level 3**: Full architecture space with all network types and components
+
+- Search proceeds through these phases:
+  1. Early generations focus on finding good basic architectures
+  2. Middle generations refine and expand promising structures
+  3. Later generations explore the full architecture space
+  
+- For each complexity level, constraints are placed on:
+  - Number of layers
+  - Network types allowed
+  - Layer configurations (filters, kernel sizes, etc.)
+  - Advanced features (skip connections, normalization, etc.)
+
+### Exploration Strategies
+
+To ensure thorough search space coverage:
+
+- **Mutation Mechanism**: The mutation system applies stochastic changes to architecture parameters:
+  - Each parameter has an independent chance (controlled by mutation_rate) of being modified
+  - Network type has a lower mutation probability (0.2 × mutation_rate) to prevent disruptive changes
+  - Layer-specific parameters can be added/removed when layer count changes
+  - Numeric parameters are perturbed within their allowed ranges
+  - Categorical parameters (activations, etc.) randomly select from available options
+  - All mutations respect architectural constraints to ensure validity
+- **Diversity Tracking**: The system quantifies population diversity at each generation:
+  - Calculates Shannon entropy across all architecture parameters
+  - Monitors distribution of parameter values in the population
+  - Tracks diversity metrics over time to detect convergence
+  - Logs diversity scores that can be visualized to understand search dynamics
+  - Higher scores indicate more diverse exploration of the search space
+- **Tournament Selection**: Uses competitive selection to balance exploration and exploitation:
+  - Randomly samples a small subset (tournament_size) of architectures
+  - Selects the best performer from each tournament as a parent
+  - Smaller tournament sizes maintain diversity but slow convergence
+  - Larger tournament sizes increase selection pressure toward top performers
+  - Creates a probabilistic process where better architectures are more likely to reproduce
+
+- **Fast Mode**: Accelerates early exploration phases:
+  - Reduces the number of training epochs for evaluations
+  - Limits the number of batches processed during early generations
+  - Enables broader exploration of the architecture space
+  - Full evaluation is applied to the final best architecture
+
+- **Crossover Strategy**: Intelligently combines parent architectures to create offspring:
+  - For compatible parents (same network type), performs parameter-wise crossover
+  - For incompatible parents (different network types), applies mutation to one parent
+  - Uses single-point crossover for layer-specific parameters (filters, activations, etc.)
+  - Randomly selects parameters from either parent for global settings
+  - Ensures architectural consistency after recombination
+  - Probabilistically chooses between crossover and mutation-only reproduction
+
+### Performance Optimizations
+
+Additional optimizations include:
+
+- **Caching**: Identical architectures are evaluated only once
+- **Early Stopping**: Training uses patience-based stopping to avoid wasting computation
+- **GPU Parallelization**: Multiple architectures can be evaluated in parallel across GPUs
+- **Checkpoint System**: Search state can be saved and resumed at any point
 
 ## Installation
 
@@ -103,8 +212,7 @@ Common options:
 - `--num-workers`: Number of worker threads for data loading
 - `--checkpoint-frequency`: Save a checkpoint every N generations (0 to disable)
 - `--resume-from`: Path to a checkpoint file to resume search from
-- `--enable-weight-sharing`: Enable weight sharing between models (ENAS approach)
-- `--weight-sharing-max-models`: Maximum number of models in the weight sharing pool
+- `--weight-sharing-max-models`: Maximum number of models in the weight sharing pool (default: 100)
 
 ## Custom Datasets
 
@@ -215,7 +323,7 @@ S-NAS explores architectures with the following parameters and neural network ty
 ### Parameters
 
 #### Shared Parameters
-- Number of layers: 2-8
+- Number of layers: 2-50 (for ResNet, each "layer" is a residual block containing 2-3 actual layers)
 - Batch normalization: Yes/No
 - Dropout rate: 0.0, 0.1, 0.2, 0.3, 0.5
 - Learning rate: 0.1, 0.01, 0.001, 0.0001
@@ -281,11 +389,11 @@ python examples/example_search.py --checkpoint-frequency 2
 python examples/example_search.py --resume-from output/results/cifar10_checkpoint_gen5_20250226-123456.pkl
 ```
 
-### With Parameter Sharing (ENAS)
+### Running a Search
 
 ```python
-# Enable parameter sharing for faster search (Pham et al., 2018)
-python examples/example_search.py --enable-weight-sharing
+# Parameter sharing and progressive search are enabled by default
+python examples/example_search.py
 ```
 
 ### Evaluating an Architecture
@@ -314,10 +422,17 @@ python examples/example_evaluate.py --architecture output/best_architecture.json
 
 This will generate a Python file containing a self-contained PyTorch model that you can use in your own projects.
 
-## Performance Tips
+## Performance Features
 
-- **Fast Mode**: Early generations can use a reduced training protocol for faster exploration
-- **Parameter Sharing (ENAS)**: Enable weight sharing between models for much faster search (see below)
+S-NAS incorporates several performance optimizations by default:
+
+- **Parameter Sharing (ENAS)**: Weight sharing between models for much faster search (Pham et al., 2018)
+- **Progressive Search**: Gradual complexity increase for more efficient exploration (Liu et al., 2018)
+- **Fast Mode**: Early generations use a reduced training protocol for faster exploration
+- **Gradient Clipping**: Automatic gradient clipping prevents numerical instability issues
+
+Additional performance tips:
+
 - **GPU Parallelization**: Use multiple GPUs to evaluate architectures in parallel
 - **Population Size**: Larger populations explore more architectures but take longer
 - **Generations**: More generations allow for finer optimization but take longer
@@ -326,30 +441,89 @@ This will generate a Python file containing a self-contained PyTorch model that 
 - **Batch Size**: Larger batch sizes can speed up training on powerful GPUs
 - **Checkpointing**: Use `--checkpoint-frequency` to save progress periodically during long runs
 - **Resume Capability**: If a run is interrupted, use `--resume-from` to continue from a checkpoint
-- **Gradient Clipping**: Automatic gradient clipping prevents numerical instability issues
 
-### Weight Sharing (ENAS)
+### Advanced Search Techniques
 
-S-NAS includes an implementation of parameter sharing based on the ENAS paper by Pham et al. (2018). 
-This approach significantly speeds up architecture search by reusing weights between similar architectures:
+S-NAS incorporates two key efficiency technologies from recent research papers by default:
 
-1. When a new model is created, it attempts to reuse weights from previously trained models of the same type
+#### Parameter Sharing (ENAS)
+
+Parameter sharing based on the ENAS paper by Pham et al. (2018) significantly speeds up architecture search by reusing weights between similar architectures:
+
+1. When a new model is created, it automatically reuses weights from previously trained models of the same type
 2. Weights are transferred where layer shapes match, with new random weights used for incompatible layers
 3. The best-performing model weights are prioritized for sharing
 4. The system maintains separate weight pools for different network types (CNN, MLP, etc.)
 
-To enable parameter sharing:
+Parameter sharing typically provides a 2-5x speedup for the search process, while maintaining comparable accuracy in discovering effective architectures.
 
-```bash
-python main.py --dataset cifar10 --enable-weight-sharing
-```
+#### Progressive Search
 
-Parameter sharing typically provides 2-5x speedup for the search process, while maintaining comparable accuracy
-in discovering effective architectures. It's especially beneficial for larger datasets and deeper models.
+Progressive neural architecture search based on the paper by Liu et al. (2018) makes the search more efficient by gradually increasing architecture complexity:
+
+1. The search begins with simple architectures (fewer layers, basic components)
+2. As search progresses, complexity gradually increases in predefined levels
+3. Early generations focus on finding good basic structures with fewer parameters
+4. Later generations refine those structures with more advanced components
+
+This leads to:
+- More efficient exploration of the architecture space
+- Better architectures found with the same computational budget
+- Reduced chance of getting stuck in local optima
+
+S-NAS combines both these techniques by default, providing state-of-the-art efficiency for neural architecture search.
 
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+## TODO List
+
+1. **Add zero-shot entropy metric**
+   - Implement entropy calculation based on Zen-NAS paper
+   - Create pre-screening function to evaluate architectures without training
+   - Set appropriate thresholds for filtering architectures
+
+2. **Optimize evaluation pipeline**
+   - Add pre-screening step before full training evaluation
+   - Implement early termination for poor-performing models
+   - Create fast evaluation mode with reduced epochs
+
+3. **Improve error reporting**
+   - Add detailed error messages in evaluation functions
+   - Implement structured logging for architecture failures
+   - Create error visualization in web interface
+
+4. **Implement efficient architecture comparison**
+   - Replace JSON serialization with hash-based tracking
+   - Add fast structure similarity calculation
+   - Create architecture fingerprinting function
+
+5. **Add support for Vision Transformers**
+   - Implement ViT model in model_builder.py
+   - Add transformer-specific parameters to architecture space
+   - Create appropriate mutation operators for attention mechanisms
+
+6. **Add support for MLP-Mixer architectures**
+   - Implement MLP-Mixer model structure
+   - Add token/channel mixing parameters to architecture space
+   - Create specialized evaluation metrics for MLP-Mixer performance
+
+7. **Add Custom Dataset Support to GUI**
+   - Add file upload components to the sidebar
+   - Create a new section for dataset configuration options
+   - Implement validation for uploaded files
+  
+8. **Add Checkpoint Management to GUI**
+   - Add checkpoint frequency slider to sidebar
+   - Create a dropdown for available checkpoints
+   - Add resume button to pick up from existing checkpoint
+
+9. **Expand GPU Management in GUI**
+   - Expand GPU selection UI to include more distribution options
+   - Implement progress tracking for distributed jobs
+
+
 
 ## License
 
@@ -357,10 +531,10 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## References
 
-1. Pham, H., Guan, M. Y., Zoph, B., Le, Q. V., & Dean, J. (2018). *Efficient Neural Architecture Search via Parameter Sharing*. Proceedings of the 35th International Conference on Machine Learning, PMLR 80:4095-4104.
+1. [Efficient Neural Architecture Search via Parameter Sharing](https://arxiv.org/abs/1802.03268)
 
-2. Zoph, B., & Le, Q. V. (2017). *Neural Architecture Search with Reinforcement Learning*. International Conference on Learning Representations (ICLR). Retrieved from https://arxiv.org/abs/1611.01578
+2. [Neural Architecture Search with Reinforcement Learning](https://arxiv.org/abs/1611.01578)
 
-3. Liu, C., Zoph, B., Neumann, M., Shlens, J., Hua, W., Li, L. J., Fei-Fei, L., Yuille, A., Huang, J., & Murphy, K. (2018). *Progressive Neural Architecture Search*. European Conference on Computer Vision (ECCV). Retrieved from https://arxiv.org/abs/1802.03268
+3. [Progressive Neural Architecture Search](https://arxiv.org/abs/1712.00559)
 
-4. Zoph, B., & Le, Q. V. (2017). *Learning Transferable Architectures for Scalable Image Recognition*. Berkeley Deep RL Course. Retrieved from https://rll.berkeley.edu/deeprlcoursesp17/docs/quoc_barret.pdf
+4. [Learning Transferable Architectures for Scalable Image Recognition](https://arxiv.org/abs/1707.07012)
