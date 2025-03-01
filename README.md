@@ -1,5 +1,7 @@
 # S-NAS: Simple Neural Architecture Search
 
+**⚠️ NOTE: This project is still a work in progress and may contain bugs. Use at your own risk. ⚠️**
+
 S-NAS is a streamlined system that automates the discovery of optimal neural network architectures for specific datasets. Rather than manually designing neural networks, S-NAS efficiently explores different architecture configurations to find ones that perform best on predefined benchmark datasets.
 
 ![screenshot](./images/screenshot.png)
@@ -447,6 +449,40 @@ This will generate a Python file containing a self-contained PyTorch model that 
 
 ![screenshot](./images/export.png)
 
+## Docker Support
+
+You can run S-NAS using Docker for easier deployment across different systems:
+
+### Building the Docker Image
+
+```bash
+docker build -t snas:latest .
+```
+
+### Running the Container
+
+1. Run with web UI (Streamlit interface):
+
+```bash
+docker run -p 8501:8501 -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output snas:latest
+```
+
+2. Run with GPU support:
+
+```bash
+docker run --gpus all -p 8501:8501 -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output snas:latest
+```
+
+3. Run command-line mode:
+
+```bash
+docker run -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output snas:latest python main.py --dataset cifar10 --population-size 20 --generations 10
+```
+
+The volumes mounted with `-v` allow for data persistence between container runs:
+- The data volume lets you provide datasets without including them in the image
+- The output volume preserves search results across container runs
+
 ## Performance Features
 
 S-NAS incorporates several performance optimizations by default:
@@ -548,12 +584,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
    - Expand GPU selection UI to include more distribution options
    - Implement progress tracking for distributed jobs
 
-10. **Add Docker Support**
-   - Create Dockerfile for containerized deployment
-   - Add docker-compose.yml for easy orchestration
-   - Document container usage in README
-
-11. **Add Automated Tests**
+10. **Add Automated Tests**
    - Implement unit tests for core components
    - Add integration tests for search process
    - Set up CI pipeline for automated testing
