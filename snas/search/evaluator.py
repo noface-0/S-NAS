@@ -73,6 +73,10 @@ class Evaluator:
                 complete_architecture['input_shape'] = dataset_config['input_shape']
             if 'num_classes' not in complete_architecture:
                 complete_architecture['num_classes'] = dataset_config['num_classes']
+                
+            # Fix any parameter types that need to be lists
+            if 'use_skip_connections' in complete_architecture and not isinstance(complete_architecture['use_skip_connections'], list):
+                complete_architecture['use_skip_connections'] = [complete_architecture['use_skip_connections']] * complete_architecture['num_layers']
             
             # Get data loaders
             train_loader, val_loader, test_loader = self.dataset_registry.get_dataset(dataset_name)

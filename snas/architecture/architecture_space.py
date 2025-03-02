@@ -45,7 +45,7 @@ class ArchitectureSpace:
             # Possible dropout options
             'dropout_rate': [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
             
-            # Possible skip connection options
+            # Possible skip connection option values (each layer gets one of these) 
             'use_skip_connections': [True, False],
             
             # Possible growth factors for mobilenet
@@ -185,6 +185,14 @@ class ArchitectureSpace:
             for param in cnn_params:
                 if param in architecture and len(architecture[param]) != num_layers:
                     return False
+                    
+            # Additional check for use_skip_connections
+            if 'use_skip_connections' in architecture:
+                if isinstance(architecture['use_skip_connections'], bool):
+                    # Convert bool to list if needed before validating
+                    architecture['use_skip_connections'] = [architecture['use_skip_connections']] * num_layers
+                elif len(architecture['use_skip_connections']) != num_layers:
+                    return False
             
             # Check specific architecture requirements
             if network_type == 'mobilenet' and 'width_multiplier' not in architecture:
@@ -310,5 +318,9 @@ class ArchitectureSpace:
                     # For scalar parameters, replace with a random value
                     if param in self.space:  # Only mutate if we have options
                         mutated[param] = random.choice(self.space[param])
+        
+        # Fix use_skip_connections if it's a boolean instead of a list
+        if 'use_skip_connections' in mutated and not isinstance(mutated['use_skip_connections'], list):
+            mutated['use_skip_connections'] = [mutated['use_skip_connections']] * mutated['num_layers']
         
         return mutated

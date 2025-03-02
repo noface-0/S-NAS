@@ -61,17 +61,31 @@ class SearchVisualizer:
         is_loss_metric = False
         if 'metric_type' in history and history['metric_type'] == 'loss':
             is_loss_metric = True
-        elif any(best_fitness < 1.0 for best_fitness in history['best_fitness']) and max(history['best_fitness']) < 5.0:
-            # Heuristic: If the best fitness values are consistently small (<5) and some are less than 1,
-            # it's likely a loss metric
+        elif 'metric' in history and history['metric'].endswith('loss'):
+            # If metric name ends with 'loss', it's a loss metric
             is_loss_metric = True
+        elif any(best_fitness < 1.0 for best_fitness in history['best_fitness']) and max(history['best_fitness']) < 5.0:
+            # Accuracy metrics for classification are typically in the range [0, 1]
+            # If all values are small but close to 1, it's likely an accuracy metric, not a loss
+            if min(history['best_fitness']) > 0.5:
+                is_loss_metric = False  # Likely an accuracy metric near 1.0
+            else:
+                # Heuristic: If the best fitness values are small (<5) with some below 0.5,
+                # it's more likely a loss metric
+                is_loss_metric = True
 
+        # Get the metric name for better labels
+        metric_name = history.get('metric', 'val_acc')
+        
         if metric == 'multiple':
             # Plot multiple metrics on the same graph with enhanced styling
+            best_label = f'Best {metric_name}'
+            avg_label = f'Average {metric_name}'
+            
             best_line, = ax.plot(generations, history['best_fitness'], 'o-', color='#1f77b4',
-                                 linewidth=2.5, markersize=6, label='Best Fitness')
+                                 linewidth=2.5, markersize=6, label=best_label)
             avg_line, = ax.plot(generations, history['avg_fitness'], 's-', color='#2ca02c',
-                                linewidth=2, markersize=5, label='Average Fitness')
+                                linewidth=2, markersize=5, label=avg_label)
 
             # Fill between best and average fitness to highlight improvement
             # space
@@ -117,28 +131,28 @@ class SearchVisualizer:
                     # Get all handles and labels for legend
                     handles = [best_line, avg_line, div_line, comp_line]
                     labels = [
-                        'Best Fitness',
-                        'Average Fitness',
+                        best_label,
+                        avg_label,
                         'Diversity',
                         'Complexity Level']
                 else:
                     handles = [best_line, avg_line, div_line]
-                    labels = ['Best Fitness', 'Average Fitness', 'Diversity']
+                    labels = [best_label, avg_label, 'Diversity']
             else:
                 handles = [best_line, avg_line, div_line]
-                labels = ['Best Fitness', 'Average Fitness', 'Diversity']
+                labels = [best_label, avg_label, 'Diversity']
 
-            # Set labels for primary axis based on metric type
+            # Use the metric name we already retrieved
             if is_loss_metric:
-                ax.set_ylabel('Loss (lower is better)', fontweight='bold')
+                ax.set_ylabel(f'{metric_name} (lower is better)', fontweight='bold')
                 ax.set_title(
-                    'Search Progress (Loss) Over Generations',
+                    f'Search Progress ({metric_name}) Over Generations',
                     fontsize=14,
                     fontweight='bold')
             else:
-                ax.set_ylabel('Fitness (higher is better)', fontweight='bold')
+                ax.set_ylabel(f'{metric_name} (higher is better)', fontweight='bold')
                 ax.set_title(
-                    'Search Progress Over Generations',
+                    f'Search Progress ({metric_name}) Over Generations',
                     fontsize=14,
                     fontweight='bold')
         else:
@@ -174,36 +188,37 @@ class SearchVisualizer:
                     linewidth=2.5,
                     markersize=6)
 
-            # Set labels based on metric type
+            # Use the metric name we already retrieved at the top of the function
+            
             if metric == 'best_fitness':
                 if is_loss_metric:
                     ax.set_ylabel(
-                        'Best Loss (lower is better)',
+                        f'Best {metric_name} (lower is better)',
                         fontweight='bold')
                     ax.set_title(
-                        'Best Loss Over Generations',
+                        f'Best {metric_name} Over Generations',
                         fontsize=14,
                         fontweight='bold')
                 else:
-                    ax.set_ylabel('Best Fitness', fontweight='bold')
+                    ax.set_ylabel(f'Best {metric_name}', fontweight='bold')
                     ax.set_title(
-                        'Best Fitness Over Generations',
+                        f'Best {metric_name} Over Generations',
                         fontsize=14,
                         fontweight='bold')
 
             elif metric == 'avg_fitness':
                 if is_loss_metric:
                     ax.set_ylabel(
-                        'Average Loss (lower is better)',
+                        f'Average {metric_name} (lower is better)',
                         fontweight='bold')
                     ax.set_title(
-                        'Average Loss Over Generations',
+                        f'Average {metric_name} Over Generations',
                         fontsize=14,
                         fontweight='bold')
                 else:
-                    ax.set_ylabel('Average Fitness', fontweight='bold')
+                    ax.set_ylabel(f'Average {metric_name}', fontweight='bold')
                     ax.set_title(
-                        'Average Fitness Over Generations',
+                        f'Average {metric_name} Over Generations',
                         fontsize=14,
                         fontweight='bold')
 
@@ -840,6 +855,22 @@ class SearchVisualizer:
             # Extract data from history
             best_architectures = history['best_architecture'][-top_k:]
             best_fitness = history['best_fitness'][-top_k:]
+            
+            # Determine metric type (accuracy vs loss)
+            is_loss_metric = False
+            if 'metric_type' in history:
+                is_loss_metric = history['metric_type'] == 'loss'
+            elif 'metric' in history and history['metric'].endswith('loss'):
+                is_loss_metric = True
+            
+            # Add a title that reflects the metric type
+            metric_name = history.get('metric', 'Performance')
+            if is_loss_metric:
+                plt.suptitle(f"Parameter Importance Analysis (Loss metric: {metric_name})", 
+                         fontsize=16, fontweight='bold')
+            else:
+                plt.suptitle(f"Parameter Importance Analysis (Accuracy metric: {metric_name})", 
+                         fontsize=16, fontweight='bold')
     
             # Create pandas DataFrame for parameter analysis
             data = []
@@ -916,7 +947,7 @@ class SearchVisualizer:
                                 ha='left' if value >= 0 else 'right',
                                 va='center', fontweight='bold', fontsize=9)
     
-            # Customize plot
+            # Customize plot based on metric type (accuracy vs loss)
             ax1.set_title(
                 'Parameter Correlation with Performance',
                 fontsize=14,
@@ -926,8 +957,13 @@ class SearchVisualizer:
             ax1.grid(axis='x', linestyle='--', alpha=0.7)
     
             # Add correlation interpretation with position check
-            corr_text = "Strong positive correlation: Parameter increases performance\n"
-            corr_text += "Strong negative correlation: Parameter decreases performance"
+            if is_loss_metric:
+                corr_text = "Strong negative correlation: Parameter decreases loss (better)\n"
+                corr_text += "Strong positive correlation: Parameter increases loss (worse)"
+            else:
+                corr_text = "Strong positive correlation: Parameter increases accuracy (better)\n"
+                corr_text += "Strong negative correlation: Parameter decreases accuracy (worse)"
+                
             # Use safe transform coordinates
             ax1.text(0.02, -0.08, corr_text, transform=ax1.transAxes, fontsize=9,
                     bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))

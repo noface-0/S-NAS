@@ -358,7 +358,11 @@ class ConvolutionalModel(nn.Module):
         activations = architecture['activations']
         use_batch_norm = architecture.get('use_batch_norm', False)
         dropout_rate = architecture.get('dropout_rate', 0.0)
-        use_skip_connections = architecture.get('use_skip_connections', [False] * num_layers)
+        # Ensure skip connections is a list
+        skip_connections = architecture.get('use_skip_connections', [False] * num_layers)
+        if not isinstance(skip_connections, list):
+            skip_connections = [skip_connections] * num_layers
+        use_skip_connections = skip_connections
         
         # Input channels from the input shape
         in_channels = input_shape[0]  # First dimension is channels

@@ -661,6 +661,10 @@ def main():
             best_fitness = search.best_fitness
             history = search.history
             
+            # Add metric type to history for proper visualization
+            history['metric'] = monitor
+            history['metric_type'] = 'loss' if monitor.endswith('loss') else 'accuracy'
+            
             # Save results
             result_filename = save_search_results(
                 selected_dataset, history, best_architecture, best_fitness

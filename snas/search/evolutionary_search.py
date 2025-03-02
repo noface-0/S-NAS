@@ -82,7 +82,9 @@ class EvolutionarySearch:
             'best_architecture': [],
             'population_diversity': [],
             'evaluation_times': [],
-            'complexity_level': []  # For progressive search - tracks complexity level by generation
+            'complexity_level': [],  # For progressive search - tracks complexity level by generation
+            'metric': metric,
+            'metric_type': 'loss' if metric.endswith('loss') else 'accuracy'
         }
         
         # For tracking all evaluated architectures to avoid duplicates
@@ -109,6 +111,10 @@ class EvolutionarySearch:
                 architecture = self._sample_architecture_with_complexity(self.complexity_level)
             else:
                 architecture = self.architecture_space.sample_random_architecture()
+                
+            # Fix parameters that need to be lists for non-progressive search
+            if 'use_skip_connections' in architecture and not isinstance(architecture['use_skip_connections'], list):
+                architecture['use_skip_connections'] = [architecture['use_skip_connections']] * architecture['num_layers']
             
             # Validate the architecture
             if self.architecture_space.validate_architecture(architecture):
@@ -156,6 +162,9 @@ class EvolutionarySearch:
                 
                 if 'use_skip_connections' not in architecture:
                     architecture['use_skip_connections'] = [False for _ in range(architecture['num_layers'])]
+                elif not isinstance(architecture['use_skip_connections'], list):
+                    # Convert bool to list of bools if needed
+                    architecture['use_skip_connections'] = [architecture['use_skip_connections']] * architecture['num_layers']
                 
                 architecture['use_batch_norm'] = False
                 
@@ -184,6 +193,10 @@ class EvolutionarySearch:
             
         # Level 3 (maximum complexity) uses the full architecture space as defined
         
+        # Handle special parameter types
+        if 'use_skip_connections' in architecture and not isinstance(architecture['use_skip_connections'], list):
+            architecture['use_skip_connections'] = [architecture['use_skip_connections']] * architecture['num_layers']
+            
         # Ensure architecture is consistent after modifications
         architecture = self._ensure_architecture_consistency(architecture)
         
@@ -456,6 +469,10 @@ class EvolutionarySearch:
             # For progressive search, ensure the child matches the current complexity level
             if self.enable_progressive:
                 child = self._adapt_architecture_to_complexity(child, self.complexity_level)
+            
+            # Fix use_skip_connections if it's a boolean instead of a list (for any search mode)
+            if 'use_skip_connections' in child and not isinstance(child['use_skip_connections'], list):
+                child['use_skip_connections'] = [child['use_skip_connections']] * child['num_layers']
             
             # Validate the child
             if self.architecture_space.validate_architecture(child):
