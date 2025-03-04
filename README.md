@@ -449,39 +449,6 @@ This will generate a Python file containing a self-contained PyTorch model that 
 
 ![screenshot](./images/export.png)
 
-## Docker Support
-
-You can run S-NAS using Docker for easier deployment across different systems:
-
-### Building the Docker Image
-
-```bash
-docker build -t snas:latest .
-```
-
-### Running the Container
-
-1. Run with web UI (Streamlit interface):
-
-```bash
-docker run -p 8501:8501 -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output snas:latest
-```
-
-2. Run with GPU support:
-
-```bash
-docker run --gpus all -p 8501:8501 -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output snas:latest
-```
-
-3. Run command-line mode:
-
-```bash
-docker run -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output snas:latest python main.py --dataset cifar10 --population-size 20 --generations 10
-```
-
-The volumes mounted with `-v` allow for data persistence between container runs:
-- The data volume lets you provide datasets without including them in the image
-- The output volume preserves search results across container runs
 
 ## Performance Features
 
@@ -505,7 +472,7 @@ Additional performance tips:
 
 ### Advanced Search Techniques
 
-S-NAS incorporates two key efficiency technologies from recent research papers by default:
+S-NAS incorporates simplified versions of two key efficiency technologies from recent research papers by default. These implementations capture the core concepts while being more practical to implement:
 
 #### Parameter Sharing (ENAS)
 
@@ -517,6 +484,8 @@ Parameter sharing based on the ENAS paper by Pham et al. (2018) significantly sp
 4. The system maintains separate weight pools for different network types (CNN, MLP, etc.)
 
 Parameter sharing typically provides a 2-5x speedup for the search process, while maintaining comparable accuracy in discovering effective architectures.
+
+**Note on Implementation Difference:** Unlike the original ENAS paper which uses an RNN controller to generate architectures, S-NAS implements the parameter sharing concept from ENAS but uses evolutionary search instead of an RNN controller. This difference simplifies the implementation while still leveraging the core efficiency benefit of weight sharing between candidate architectures.
 
 #### Progressive Search
 
@@ -531,6 +500,10 @@ This leads to:
 - More efficient exploration of the architecture space
 - Better architectures found with the same computational budget
 - Reduced chance of getting stuck in local optima
+
+**Note on Implementation Difference:** The S-NAS implementation differs significantly from the original PNAS paper. The original PNAS uses a surrogate model (an LSTM predictor) to estimate architecture performance without full training, along with a sophisticated progressive widening strategy. S-NAS adopts only the concept of gradually increasing architecture complexity through predefined complexity levels during evolutionary search, without the predictive surrogate model. This simplified approach is more practical but doesn't leverage the full performance prediction benefits of the original paper.
+
+**⚠️ COMING SOON:** A more faithful implementation of PNAS including the surrogate predictor model is currently in development and will be available in a future update.
 
 S-NAS combines both these techniques by default, providing state-of-the-art efficiency for neural architecture search.
 
