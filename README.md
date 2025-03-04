@@ -35,6 +35,86 @@ S-NAS is a streamlined system that automates the discovery of optimal neural net
 - **Visualization**: Provides rich visualizations of search progress and architecture performance
 - **Streamlit Interface**: User-friendly web interface for controlling the search process with real-time progress tracking and the ability to stop ongoing searches
 
+## Installation
+
+### Requirements
+
+- Python 3.7+
+- PyTorch 1.9+
+- CUDA-compatible GPU (recommended)
+
+### Setup
+
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/noface-0/S-NAS.git
+   cd snas
+   ```
+
+2. Install dependencies:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+## Usage
+
+### Streamlit Interface
+
+The easiest way to use S-NAS is through the Streamlit interface:
+
+```bash
+streamlit run app.py
+```
+
+This will open a web interface where you can:
+
+- Select a dataset (built-in or custom)
+- Choose a search method (Evolutionary, PNAS, ENAS, or PNAS+ENAS)
+- Configure search parameters
+- Run the search process with real-time progress tracking
+- Stop any search in progress while preserving intermediate results
+- Resume from saved checkpoints
+- Monitor search progress with dual progress bars (overall and current phase)
+- Visualize results with interactive charts
+- Export discovered architectures
+
+### Command Line
+
+You can also run S-NAS from the command line for batch processing:
+
+```bash
+python main.py --dataset cifar10 --population-size 20 --generations 10 --gpu-ids 0,1
+```
+
+Common options:
+
+- `--dataset`: Dataset to use (`cifar10`, `mnist`, `fashion_mnist`)
+- `--search-method`: Search method to use (`evolutionary`, `pnas`, `enas`, `pnas_enas`)
+- `--network-type`: Network architecture type (`all`, `cnn`, `mlp`, `resnet`, `mobilenet`)
+- `--population-size`: Population size for evolutionary search
+- `--generations`: Number of generations/iterations to run
+- `--gpu-ids`: Comma-separated list of GPU IDs to use
+- `--output-dir`: Directory to save results
+- `--evaluate`: Path to an architecture JSON file for evaluation only
+- `--patience`: Early stopping patience (number of epochs without improvement)
+- `--min-delta`: Minimum change to qualify as improvement for early stopping
+- `--monitor`: Metric to monitor for early stopping ('val_acc' or 'val_loss')
+- `--num-workers`: Number of worker threads for data loading
+- `--checkpoint-frequency`: Save a checkpoint every N generations (0 to disable)
+- `--resume-from`: Path to a checkpoint file to resume search from
+- `--weight-sharing-max-models`: Maximum number of models in the weight sharing pool (default: 100)
+
+#### PNAS-specific options:
+- `--beam-size`: Number of top architectures to keep in the beam (default: 10)
+- `--max-complexity`: Maximum complexity level to explore (default: 3)
+- `--num-expansions`: Number of expansions per architecture in the beam (default: 5)
+
+#### ENAS-specific options:
+- `--controller-sample-count`: Number of architectures for the controller to sample (default: 50)
+- `--controller-entropy-weight`: Entropy weight for exploration (default: 0.1)
+
 ## How It Works
 
 S-NAS combines evolutionary algorithms with advanced optimization techniques for efficient neural architecture search:
@@ -152,6 +232,48 @@ Progressive complexity growth makes exploration more efficient:
   - Layer configurations (filters, kernel sizes, etc.)
   - Advanced features (skip connections, normalization, etc.)
 
+#### Detailed Complexity Level Explanation
+
+Complexity levels control how architectures evolve during search, gradually expanding from simple to more sophisticated:
+
+**Level 1 (Simple)**
+- Restricts architectures to a maximum of 3 layers
+- Limits network types to basic CNNs and MLPs
+- Restricts filter counts to smaller values (≤ 128)
+- Disables skip connections and batch normalization
+- Uses only ReLU activations
+- Creates a focused search space of simple architectures that train quickly
+
+**Level 2 (Moderate)**
+- Allows up to 5 layers
+- Expands network types to include ResNet, MobileNet, and Enhanced MLP
+- Permits moderate filter counts (up to 256)
+- Allows batch normalization and some skip connections
+- Supports various activation functions (ReLU, Leaky ReLU, ELU)
+- Builds on promising architectures from Level 1 by adding complexity
+
+**Level 3 (Complex)**
+- Allows full range of layers (up to the maximum defined in the search)
+- Includes all network types (including DenseNet, ShuffleNetV2, EfficientNet)
+- Supports maximum filter counts (up to 512)
+- Enables all advanced features (skip connections, residual blocks, etc.)
+- Allows all activation functions and normalization techniques
+- Fine-tunes the most promising architectures with sophisticated components
+
+The search transitions between these levels automatically based on progress and can be visualized in real-time through the UI. Here's how to configure complexity in different search methods:
+
+**In the UI:**
+- For **PNAS Search**: Set the "Maximum Complexity Level" slider (1-3) in the search parameters
+- For **Evolutionary Search**: Enable/disable progressive search using the checkbox
+- For **PNAS+ENAS Combined**: Controls both the maximum complexity and the transition schedule
+
+**Via Command Line:**
+- For PNAS: `--max-complexity 2` (default) to set maximum complexity level
+- For Evolutionary: `--enable-progressive true` to enable progressive complexity
+- For Combined: `--max-complexity 3 --enable-progressive true`
+
+The progress bars in the UI will show which complexity level the search is currently exploring, and transitions are visible in the search visualization.
+
  **Note on Progressive Search and MLP Bias**
 
   When using progressive search with datasets like MNIST, you may notice a bias toward MLP architectures in the search results. This occurs because:
@@ -217,86 +339,6 @@ Additional optimizations include:
 - **Checkpoint System**: Search state can be saved and resumed at any point
 - **Progress Tracking**: Dual progress bars (overall progress and current phase progress) provide detailed feedback
 - **Interruptible Search**: Any search can be stopped at any time, preserving results found so far
-
-## Installation
-
-### Requirements
-
-- Python 3.7+
-- PyTorch 1.9+
-- CUDA-compatible GPU (recommended)
-
-### Setup
-
-1. Clone the repository:
-
-``` bash
-   git clone https://github.com/noface-0/S-NAS.git
-   cd snas
-```
-
-2. Install dependencies:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## Usage
-
-### Streamlit Interface
-
-The easiest way to use S-NAS is through the Streamlit interface:
-
-```bash
-streamlit run app.py
-```
-
-This will open a web interface where you can:
-
-- Select a dataset (built-in or custom)
-- Choose a search method (Evolutionary, PNAS, ENAS, or PNAS+ENAS)
-- Configure search parameters
-- Run the search process with real-time progress tracking
-- Stop any search in progress while preserving intermediate results
-- Resume from saved checkpoints
-- Monitor search progress with dual progress bars (overall and current phase)
-- Visualize results with interactive charts
-- Export discovered architectures
-
-### Command Line
-
-You can also run S-NAS from the command line for batch processing:
-
-```bash
-python main.py --dataset cifar10 --population-size 20 --generations 10 --gpu-ids 0,1
-```
-
-Common options:
-
-- `--dataset`: Dataset to use (`cifar10`, `mnist`, `fashion_mnist`)
-- `--search-method`: Search method to use (`evolutionary`, `pnas`, `enas`, `pnas_enas`)
-- `--network-type`: Network architecture type (`all`, `cnn`, `mlp`, `resnet`, `mobilenet`)
-- `--population-size`: Population size for evolutionary search
-- `--generations`: Number of generations/iterations to run
-- `--gpu-ids`: Comma-separated list of GPU IDs to use
-- `--output-dir`: Directory to save results
-- `--evaluate`: Path to an architecture JSON file for evaluation only
-- `--patience`: Early stopping patience (number of epochs without improvement)
-- `--min-delta`: Minimum change to qualify as improvement for early stopping
-- `--monitor`: Metric to monitor for early stopping ('val_acc' or 'val_loss')
-- `--num-workers`: Number of worker threads for data loading
-- `--checkpoint-frequency`: Save a checkpoint every N generations (0 to disable)
-- `--resume-from`: Path to a checkpoint file to resume search from
-- `--weight-sharing-max-models`: Maximum number of models in the weight sharing pool (default: 100)
-
-#### PNAS-specific options:
-- `--beam-size`: Number of top architectures to keep in the beam (default: 10)
-- `--max-complexity`: Maximum complexity level to explore (default: 3)
-- `--num-expansions`: Number of expansions per architecture in the beam (default: 5)
-
-#### ENAS-specific options:
-- `--controller-sample-count`: Number of architectures for the controller to sample (default: 50)
-- `--controller-entropy-weight`: Entropy weight for exploration (default: 0.1)
 
 ## Custom Datasets
 
@@ -582,6 +624,32 @@ This leads to:
 - Reduced chance of getting stuck in local optima
 
 S-NAS combines both these techniques by default, providing state-of-the-art efficiency for neural architecture search.
+
+#### Optimizing Complexity Levels For Your Task
+
+The complexity level settings can significantly impact search efficiency and results:
+
+- **For simple datasets** (MNIST, Fashion-MNIST):
+  - Consider setting a lower maximum complexity (1-2)
+  - Set a longer duration at Level 1 to thoroughly explore simpler architectures
+  - If you want CNNs, consider disabling progressive search to avoid MLP bias
+
+- **For medium datasets** (CIFAR-10, SVHN):
+  - Use the default maximum complexity (2)
+  - Balance time spent at each level
+  - Consider using PNAS+ENAS combined for best efficiency
+
+- **For complex datasets** (CIFAR-100, ImageNet):
+  - Set maximum complexity to 3
+  - Allow sufficient iterations at each level
+  - Use parameter sharing to manage training time
+
+- **For custom datasets**:
+  - Start with a lower complexity (1-2) and monitor results
+  - If models are underfitting, gradually increase complexity
+  - Pay attention to the best-performing architecture type at each complexity level
+
+The complexity mechanism works hand-in-hand with the progress tracking and stop functionality, allowing you to interrupt the search if you observe diminishing returns at higher complexity levels.
 
 ## Contributing
 
