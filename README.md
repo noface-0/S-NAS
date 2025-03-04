@@ -8,7 +8,11 @@ S-NAS is a streamlined system that automates the discovery of optimal neural net
 
 ## Features
 
-- **Evolutionary Search**: Uses genetic algorithms to efficiently explore the architecture space
+- **Multiple Search Methods**:
+  - **Evolutionary Search**: Uses genetic algorithms to efficiently explore the architecture space
+  - **PNAS (Progressive Neural Architecture Search)**: Uses a surrogate model to predict architecture performance
+  - **ENAS (Efficient Neural Architecture Search)**: Uses parameter sharing between models for faster evaluation
+  - **PNAS+ENAS (Combined)**: A hybrid approach combining surrogate modeling with parameter sharing
 - **Multiple Neural Network Types**: Supports CNNs, MLPs, ResNets, and MobileNets
 - **Multiple Datasets**: Works with standard datasets:
   - [CIFAR-10 & CIFAR-100](https://www.cs.toronto.edu/~kriz/cifar.html) (32×32 RGB images)
@@ -29,15 +33,52 @@ S-NAS is a streamlined system that automates the discovery of optimal neural net
 - **Checkpoint System**: Automatic state saving and recovery for long-running searches
 - **Distributed Evaluation**: Distributes model training across multiple GPUs
 - **Visualization**: Provides rich visualizations of search progress and architecture performance
-- **Streamlit Interface**: User-friendly web interface for controlling the search process
+- **Streamlit Interface**: User-friendly web interface for controlling the search process with real-time progress tracking and the ability to stop ongoing searches
 
 ## How It Works
 
 S-NAS combines evolutionary algorithms with advanced optimization techniques for efficient neural architecture search:
 
-### Core Search Algorithm
+### Search Methods
 
-The search process follows these steps:
+S-NAS offers several state-of-the-art neural architecture search methods, all of which support real-time progress tracking and the ability to interrupt searches while preserving results:
+
+#### Evolutionary Search
+
+The traditional evolutionary algorithm that uses genetic operations to explore the architecture space:
+- Uses tournament selection, crossover, and mutation
+- Gradually improves architectures through generations
+- Balances exploration and exploitation through selection pressure
+
+#### PNAS (Progressive Neural Architecture Search)
+
+Based on the paper by Liu et al. (2018), PNAS uses a surrogate model to predict performance:
+- Trains an LSTM-based surrogate model on evaluated architectures
+- Uses the model to predict performance of new candidate architectures
+- Focuses evaluation on the most promising candidates
+- Progressively increases architecture complexity
+- Provides detailed progress tracking for each search phase (initial evaluation, model training, prediction)
+
+#### ENAS (Efficient Neural Architecture Search)
+
+Based on the paper by Pham et al. (2018), ENAS uses parameter sharing for efficiency:
+- Maintains a shared pool of weights for similar architectures
+- Uses a controller (RNN) to sample architectures
+- Trains the controller with reinforcement learning
+- Significantly speeds up the search process
+
+#### PNAS+ENAS Combined
+
+A hybrid approach that combines the strengths of both PNAS and ENAS:
+- Uses surrogate model from PNAS for prediction
+- Leverages parameter sharing from ENAS for efficiency
+- Balances between prediction-based and shared-weights-based evaluations using a configurable importance weight
+- Allows fine-tuning the balance between surrogate model predictions and shared weights evaluations
+- Offers the most efficient search while maintaining high quality
+
+### Core Search Process
+
+The general search process follows these steps:
 
 1. **Initialization**:
    - Creates a population of random architecture configurations
@@ -66,8 +107,14 @@ The search process follows these steps:
    - Complexity gradually increases as search progresses
    - Weight sharing becomes more effective as the pool of trained models grows
    - Population diversity is monitored to prevent premature convergence
+   - Progress is tracked and displayed in real-time through dual progress bars
 
-6. **Export**:
+6. **Search Control**:
+   - Searches can be interrupted at any time while preserving results found so far
+   - Checkpoints are saved periodically for long-running searches
+   - Search state can be resumed from previously saved checkpoints
+
+7. **Export**:
    - Returns the best-discovered architecture after all generations
    - Can export to multiple model formats (ONNX, TorchScript, etc.)
 
@@ -168,6 +215,8 @@ Additional optimizations include:
 - **Early Stopping**: Training uses patience-based stopping to avoid wasting computation
 - **GPU Parallelization**: Multiple architectures can be evaluated in parallel across GPUs
 - **Checkpoint System**: Search state can be saved and resumed at any point
+- **Progress Tracking**: Dual progress bars (overall progress and current phase progress) provide detailed feedback
+- **Interruptible Search**: Any search can be stopped at any time, preserving results found so far
 
 ## Installation
 
@@ -204,10 +253,14 @@ streamlit run app.py
 
 This will open a web interface where you can:
 
-- Select a dataset
+- Select a dataset (built-in or custom)
+- Choose a search method (Evolutionary, PNAS, ENAS, or PNAS+ENAS)
 - Configure search parameters
-- Run the search process
-- Visualize results
+- Run the search process with real-time progress tracking
+- Stop any search in progress while preserving intermediate results
+- Resume from saved checkpoints
+- Monitor search progress with dual progress bars (overall and current phase)
+- Visualize results with interactive charts
 - Export discovered architectures
 
 ### Command Line
@@ -221,9 +274,10 @@ python main.py --dataset cifar10 --population-size 20 --generations 10 --gpu-ids
 Common options:
 
 - `--dataset`: Dataset to use (`cifar10`, `mnist`, `fashion_mnist`)
+- `--search-method`: Search method to use (`evolutionary`, `pnas`, `enas`, `pnas_enas`)
 - `--network-type`: Network architecture type (`all`, `cnn`, `mlp`, `resnet`, `mobilenet`)
 - `--population-size`: Population size for evolutionary search
-- `--generations`: Number of generations to evolve
+- `--generations`: Number of generations/iterations to run
 - `--gpu-ids`: Comma-separated list of GPU IDs to use
 - `--output-dir`: Directory to save results
 - `--evaluate`: Path to an architecture JSON file for evaluation only
@@ -234,6 +288,15 @@ Common options:
 - `--checkpoint-frequency`: Save a checkpoint every N generations (0 to disable)
 - `--resume-from`: Path to a checkpoint file to resume search from
 - `--weight-sharing-max-models`: Maximum number of models in the weight sharing pool (default: 100)
+
+#### PNAS-specific options:
+- `--beam-size`: Number of top architectures to keep in the beam (default: 10)
+- `--max-complexity`: Maximum complexity level to explore (default: 3)
+- `--num-expansions`: Number of expansions per architecture in the beam (default: 5)
+
+#### ENAS-specific options:
+- `--controller-sample-count`: Number of architectures for the controller to sample (default: 50)
+- `--controller-entropy-weight`: Entropy weight for exploration (default: 0.1)
 
 ## Custom Datasets
 
@@ -316,7 +379,11 @@ Each exported model comes with an example Python script showing how to use it.
 - `snas/`: Main package
   - `architecture/`: Architecture space and model builder
   - `data/`: Dataset registry
-  - `search/`: Evolutionary search and evaluator
+  - `search/`: Search algorithms and evaluation
+    - `evolutionary_search.py`: Evolutionary search algorithm
+    - `evaluator.py`: Architecture evaluation component
+    - `pnas/`: Progressive Neural Architecture Search implementation
+    - `enas_search.py`: Efficient Neural Architecture Search implementation
   - `utils/`: Utility modules
     - `job_distributor.py`: Parallel evaluation across multiple GPUs
     - `exceptions.py`: Custom exception classes for structured error handling
@@ -325,6 +392,9 @@ Each exported model comes with an example Python script showing how to use it.
 - `app.py`: Streamlit application
 - `main.py`: Command-line interface
 - `examples/`: Example scripts
+  - `example_search.py`: Example of evolutionary search
+  - `example_pnas_search.py`: Example of Progressive NAS
+  - `example_evaluate.py`: Example of evaluating architectures
 
 ## Architecture Space
 
@@ -410,11 +480,21 @@ python examples/example_search.py --checkpoint-frequency 2
 python examples/example_search.py --resume-from output/results/cifar10_checkpoint_gen5_20250226-123456.pkl
 ```
 
-### Running a Search
+### Running Different Search Methods
 
 ```python
-# Parameter sharing and progressive search are enabled by default
+# Evolutionary Search (default)
 python examples/example_search.py
+
+# PNAS Search
+python examples/example_pnas_search.py
+
+# ENAS Search
+# For command-line, use main.py which supports all search methods
+python main.py --dataset cifar10 --search-method enas
+
+# PNAS+ENAS Combined
+python examples/example_pnas_search.py --use-shared-weights --shared-weights-importance 0.5
 ```
 
 ### Evaluating an Architecture
@@ -449,39 +529,6 @@ This will generate a Python file containing a self-contained PyTorch model that 
 
 ![screenshot](./images/export.png)
 
-## Docker Support
-
-You can run S-NAS using Docker for easier deployment across different systems:
-
-### Building the Docker Image
-
-```bash
-docker build -t snas:latest .
-```
-
-### Running the Container
-
-1. Run with web UI (Streamlit interface):
-
-```bash
-docker run -p 8501:8501 -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output snas:latest
-```
-
-2. Run with GPU support:
-
-```bash
-docker run --gpus all -p 8501:8501 -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output snas:latest
-```
-
-3. Run command-line mode:
-
-```bash
-docker run -v $(pwd)/data:/app/data -v $(pwd)/output:/app/output snas:latest python main.py --dataset cifar10 --population-size 20 --generations 10
-```
-
-The volumes mounted with `-v` allow for data persistence between container runs:
-- The data volume lets you provide datasets without including them in the image
-- The output volume preserves search results across container runs
 
 ## Performance Features
 
@@ -502,6 +549,8 @@ Additional performance tips:
 - **Batch Size**: Larger batch sizes can speed up training on powerful GPUs
 - **Checkpointing**: Use `--checkpoint-frequency` to save progress periodically during long runs
 - **Resume Capability**: If a run is interrupted, use `--resume-from` to continue from a checkpoint
+- **Progress Tracking**: All search methods provide detailed progress information through dual progress bars
+- **Interruptible Search**: Any search can be stopped safely while preserving results found so far
 
 ### Advanced Search Techniques
 
@@ -570,24 +619,20 @@ Contributions are welcome! Please feel free to submit a Pull Request.
    - Add token/channel mixing parameters to architecture space
    - Create specialized evaluation metrics for MLP-Mixer performance
 
-7. **Add Custom Dataset Support to GUI**
-   - Add file upload components to the sidebar
-   - Create a new section for dataset configuration options
-   - Implement validation for uploaded files
-  
-8. **Add Checkpoint Management to GUI**
-   - Add checkpoint frequency slider to sidebar
-   - Create a dropdown for available checkpoints
-   - Add resume button to pick up from existing checkpoint
-
-9. **Expand GPU Management in GUI**
-   - Expand GPU selection UI to include more distribution options
-   - Implement progress tracking for distributed jobs
-
-10. **Add Automated Tests**
+7. **Add Automated Tests**
    - Implement unit tests for core components
    - Add integration tests for search process
    - Set up CI pipeline for automated testing
+
+8. **Optimize UI Responsiveness**
+   - Further improve progress tracking during long operations
+   - Add more granular progress reporting for complex search phases
+   - Enhance real-time visualization during search
+
+9. **Add search space visualization**
+   - Create interactive visualization of the architecture space
+   - Implement heatmaps showing explored vs unexplored regions
+   - Add visualization of architectural similarity between models
 
 
 

@@ -36,6 +36,9 @@ from snas.architecture.architecture_space import ArchitectureSpace
 from snas.architecture.model_builder import ModelBuilder
 from snas.search.evaluator import Evaluator
 from snas.search.evolutionary_search import EvolutionarySearch
+from snas.search.pnas.pnas_search import PNASSearch
+from snas.search.pnas.surrogate_model import SurrogateModel
+from snas.search.enas_search import ENASSearch
 from snas.utils.job_distributor import JobDistributor, ParallelEvaluator
 from snas.visualization.visualizer import SearchVisualizer
 
@@ -347,12 +350,68 @@ def main():
 
     # Search parameters
     st.sidebar.subheader("Search Parameters")
-    population_size = st.sidebar.slider("Population Size", 5, 50, 20)
-    num_generations = st.sidebar.slider("Number of Generations", 5, 50, 10)
-    mutation_rate = st.sidebar.slider("Mutation Rate", 0.1, 0.5, 0.2, 0.05)
-    fast_mode_gens = st.sidebar.slider("Fast Evaluation Generations", 0, 5, 2)
-    enable_progressive = st.sidebar.checkbox("Enable Progressive Search", value=True, 
-                        help="Start with simpler architectures and increase complexity over generations. Disable to avoid MLP bias on simple datasets like MNIST.")
+    
+    # Search method selection
+    search_method = st.sidebar.radio(
+        "Search Method",
+        ["Evolutionary Search", "PNAS (Progressive Neural Architecture Search)", "ENAS (Efficient Neural Architecture Search)", "PNAS+ENAS (Combined)"],
+        help="Select the search method. Evolutionary Search is more exploratory, PNAS uses surrogate modeling, ENAS uses parameter sharing for efficiency, and PNAS+ENAS combines both approaches."
+    )
+    # Common parameters
+    num_iterations = st.sidebar.slider(
+        "Number of Iterations", 5, 50, 10, 
+        help="For Evolutionary Search: number of generations. For PNAS: total number of architecture evaluations."
+    )
+    fast_mode_iterations = st.sidebar.slider(
+        "Fast Evaluation Iterations", 0, 5, 2,
+        help="Number of initial iterations to use fast evaluation mode (fewer epochs)"
+    )
+    # Defaults for display purposes (used only by specific search methods)
+    population_size = 20
+    mutation_rate = 0.2
+    enable_progressive = True
+    beam_size = 5
+    max_complexity = 2
+    num_expansions = 5
+    shared_weights_importance = 0.5
+    controller_sample_count = 50
+    weight_sharing_max_models = 100
+    controller_entropy_weight = 0.1
+    
+    # Evolutionary Search specific parameters
+    if search_method == "Evolutionary Search":
+        population_size = st.sidebar.slider("Population Size", 5, 50, 20)
+        mutation_rate = st.sidebar.slider("Mutation Rate", 0.1, 0.5, 0.2, 0.05)
+        enable_progressive = st.sidebar.checkbox("Enable Progressive Search", value=True, 
+                            help="Start with simpler architectures and increase complexity over generations. Disable to avoid MLP bias on simple datasets like MNIST.")
+    
+    # PNAS, ENAS and PNAS+ENAS specific parameters
+    elif search_method in ["PNAS (Progressive Neural Architecture Search)", "PNAS+ENAS (Combined)"]:
+        # PNAS parameters
+        beam_size = st.sidebar.slider("Beam Size", 2, 20, 5, 
+                                    help="Number of top architectures to keep in each complexity level")
+        max_complexity = st.sidebar.slider("Maximum Complexity Level", 1, 3, 2,
+                                         help="Maximum complexity level to explore (1=simplest, 3=most complex)")
+        num_expansions = st.sidebar.slider("Expansions per Architecture", 2, 10, 5,
+                                         help="Number of variations to generate for each architecture in the beam")
+        
+        # PNAS+ENAS specific parameters
+        if search_method == "PNAS+ENAS (Combined)":
+            # Parameter sharing is always enabled, but show additional options
+            weight_sharing_max_models = st.sidebar.slider("Weight Sharing Pool Size", 50, 500, 100,
+                                                     help="Maximum number of models to keep in parameter sharing pool")
+            shared_weights_importance = st.sidebar.slider("Shared Weights Importance", 0.1, 0.9, 0.5, 0.1,
+                                                      help="Balance between surrogate model and shared weights (higher = more weight to shared parameters)")
+    
+    # ENAS specific parameters
+    elif search_method == "ENAS (Efficient Neural Architecture Search)":
+        # ENAS uses a controller to sample architectures and shared weights for evaluation
+        controller_sample_count = st.sidebar.slider("Controller Sample Count", 10, 100, 50,
+                                               help="Number of architectures for the controller to sample in each iteration")
+        weight_sharing_max_models = st.sidebar.slider("Weight Sharing Pool Size", 100, 1000, 200,
+                                                 help="Maximum number of models to keep in parameter sharing pool")
+        controller_entropy_weight = st.sidebar.slider("Controller Exploration Weight", 0.0, 0.5, 0.1, 0.01,
+                                                 help="Entropy weight to encourage exploration (higher = more exploration)")
     
     # Checkpoint parameters 
     st.sidebar.subheader("Checkpoint Management")
@@ -417,14 +476,41 @@ def main():
     with tab1:
         st.header("Neural Architecture Search")
         
-        st.markdown(f"""
+        # Common configuration info
+        config_info = f"""
         ### Current Configuration
         - **Dataset**: {selected_dataset}
         - **Network Type**: {network_type}
-        - **Population Size**: {population_size}
-        - **Generations**: {num_generations}
+        - **Search Method**: {search_method}
+        - **Iterations**: {num_iterations}
         - **Hardware**: {"GPU" if use_gpu else "CPU"}
-        """)
+        """
+        
+        # Search method specific parameters
+        if search_method == "Evolutionary Search":
+            config_info += f"""
+        - **Population Size**: {population_size}
+        - **Mutation Rate**: {mutation_rate}
+        - **Progressive Search**: {"Enabled" if enable_progressive else "Disabled"}
+            """
+        elif search_method in ["PNAS (Progressive Neural Architecture Search)", "PNAS+ENAS (Combined)"]:
+            config_info += f"""
+        - **Beam Size**: {beam_size}
+        - **Max Complexity**: {max_complexity}
+        - **Expansions per Architecture**: {num_expansions}
+            """
+            if search_method == "PNAS+ENAS (Combined)":
+                config_info += f"""
+        - **Shared Weights Importance**: {shared_weights_importance}
+                """
+        elif search_method == "ENAS (Efficient Neural Architecture Search)":
+            config_info += f"""
+        - **Controller Sample Count**: {controller_sample_count}
+        - **Weight Sharing Pool Size**: {weight_sharing_max_models}
+        - **Controller Exploration Weight**: {controller_entropy_weight}
+            """
+        
+        st.markdown(config_info)
         
         # Status indicators for errors
         error_placeholder = st.empty()
@@ -441,284 +527,642 @@ def main():
         if selected_checkpoint != "None":
             info_placeholder.info(f"Will resume search from checkpoint: {selected_checkpoint}")
         
-        # Start search button
-        if st.button("Start Search"):
-            # Clear any previous messages
-            error_placeholder.empty()
-            info_placeholder.empty()
+        # Add a session state variable to track if search is running
+        if 'search_running' not in st.session_state:
+            st.session_state.search_running = False
             
-            with st.spinner("Initializing components..."):
-                # Prepare custom dataset parameters if needed
-                custom_dataset_params = None
-                if use_custom_dataset and selected_dataset.startswith("custom_"):
-                    if custom_dataset_type == "Folder Structure":
-                        custom_dataset_params = {
-                            'type': 'folder',
-                            'folder_path': custom_folder_path,
-                            'image_size': image_size
-                        }
-                    else:  # CSV File
-                        custom_dataset_params = {
-                            'type': 'csv',
-                            'csv_path': custom_csv_path,
-                            'image_column': image_column,
-                            'label_column': label_column,
-                            'image_size': image_size
-                        }
+        # Also track whether search was stopped by user
+        if 'search_stopped' not in st.session_state:
+            st.session_state.search_stopped = False
+            
+        # Create button that changes function based on state
+        if st.session_state.search_running:
+            # If search is running, show stop button
+            stop_search = st.button("Stop Search", type="primary")
+            if stop_search:
+                st.session_state.search_stopped = True
+                st.warning("Search stop requested. Waiting for current operation to complete...")
                 
-                try:
-                    # Initialize components only when needed
-                    components = initialize_components(
-                        selected_dataset, 
-                        batch_size, 
-                        num_workers, 
-                        use_gpu and torch.cuda.is_available(),
-                        gpu_ids,
-                        device,
-                        custom_dataset_params
-                    )
-                except Exception as e:
-                    # Display error and exit
-                    error_placeholder.error(f"Failed to initialize search components: {str(e)}")
+        else:
+            # If search is not running, show start button
+            start_search = st.button("Start Search", type="primary")
+            if start_search:
+                # Clear any previous messages
+                error_placeholder.empty()
+                info_placeholder.empty()
+                
+                # Set search as running
+                st.session_state.search_running = True
+                st.session_state.search_stopped = False
+                
+                # Initialize search variable at this scope
+                search = None
+                
+                with st.spinner("Initializing components..."):
+                    # Prepare custom dataset parameters if needed
+                    custom_dataset_params = None
+                    if use_custom_dataset and selected_dataset.startswith("custom_"):
+                        if custom_dataset_type == "Folder Structure":
+                            custom_dataset_params = {
+                                'type': 'folder',
+                                'folder_path': custom_folder_path,
+                                'image_size': image_size
+                            }
+                        else:  # CSV File
+                            custom_dataset_params = {
+                                'type': 'csv',
+                                'csv_path': custom_csv_path,
+                                'image_column': image_column,
+                                'label_column': label_column,
+                                'image_size': image_size
+                            }
+                    
+                    try:
+                        # Initialize components only when needed
+                        components = initialize_components(
+                            selected_dataset, 
+                            batch_size, 
+                            num_workers, 
+                            use_gpu and torch.cuda.is_available(),
+                            gpu_ids,
+                            device,
+                            custom_dataset_params
+                        )
+                        
+                        # Create evaluator with parameter sharing settings based on search method
+                        if search_method == "PNAS+ENAS (Combined)":
+                            # For combined PNAS+ENAS, use the user-defined weight sharing pool size
+                            evaluator = Evaluator(
+                                dataset_registry=components['dataset_registry'],
+                                model_builder=components['model_builder'],
+                                device=device,
+                                max_epochs=max_epochs,
+                                patience=patience,
+                                min_delta=min_delta,
+                                monitor=monitor,
+                                enable_weight_sharing=True,  # Parameter sharing always enabled for PNAS+ENAS
+                                weight_sharing_max_models=weight_sharing_max_models  # User-defined pool size
+                            )
+                        else:
+                            # For other methods, use default parameter sharing settings
+                            evaluator = Evaluator(
+                                dataset_registry=components['dataset_registry'],
+                                model_builder=components['model_builder'],
+                                device=device,
+                                max_epochs=max_epochs,
+                                patience=patience,
+                                min_delta=min_delta,
+                                monitor=monitor,
+                                enable_weight_sharing=True,  # Parameter sharing always enabled
+                                weight_sharing_max_models=100  # Keep up to 100 models in the sharing pool
+                            )
+                            
+                        # Set up job distributor if using multiple GPUs
+                        if use_gpu and len(gpu_ids) > 1:
+                            job_distributor = JobDistributor(
+                                num_workers=len(gpu_ids),
+                                device_ids=gpu_ids
+                            )
+                            parallel_evaluator = ParallelEvaluator(
+                                evaluator=evaluator,
+                                job_distributor=job_distributor
+                            )
+                        else:
+                            parallel_evaluator = None
+                            
+                    except Exception as e:
+                        # Display error and exit
+                        error_placeholder.error(f"Failed to initialize search components: {str(e)}")
+                        # Reset search state
+                        st.session_state.search_running = False
+                        st.session_state.search_stopped = False
+                        return
+                    
+                    # Check if resuming from checkpoint
+                    search = None
+                    if selected_checkpoint != "None":
+                        checkpoint_path = os.path.join(RESULTS_DIR, selected_checkpoint)
+                        st.info(f"Resuming search from checkpoint: {selected_checkpoint}")
+                        
+                        # Load checkpoint data
+                        with open(checkpoint_path, 'rb') as f:
+                            checkpoint_data = pickle.load(f)
+                        
+                        # Create appropriate search object with checkpoint data based on search method
+                        if search_method == "Evolutionary Search":
+                            search = EvolutionarySearch(
+                                architecture_space=components['architecture_space'],
+                                evaluator=evaluator,
+                                dataset_name=selected_dataset,
+                                population_size=population_size,
+                                mutation_rate=mutation_rate,
+                                generations=num_iterations,
+                                elite_size=2,
+                                tournament_size=3,
+                                metric=monitor,
+                                save_history=True,
+                                enable_progressive=enable_progressive,
+                                checkpoint_data=checkpoint_data  # Provide checkpoint data
+                            )
+                        else:  # PNAS or other methods
+                            # Create a surrogate model
+                            surrogate_model = SurrogateModel(device=device)
+                            
+                            # Try to load surrogate model if available
+                            surrogate_model_path = f"{RESULTS_DIR}/{selected_dataset}_surrogate_model.pt"
+                            if os.path.exists(surrogate_model_path):
+                                try:
+                                    surrogate_model.load_model(surrogate_model_path)
+                                    st.info(f"Loaded existing surrogate model from {surrogate_model_path}")
+                                except Exception as e:
+                                    st.warning(f"Could not load surrogate model: {e}")
+                                    surrogate_model = SurrogateModel(device=device)
+                            
+                            if search_method == "PNAS (Progressive Neural Architecture Search)" or search_method == "PNAS+ENAS (Combined)":
+                                # For PNAS or combined PNAS+ENAS
+                                if search_method == "PNAS+ENAS (Combined)":
+                                    # For combined approach, add special parameters
+                                    search = PNASSearch(
+                                        architecture_space=components['architecture_space'],
+                                        evaluator=evaluator,
+                                        dataset_name=selected_dataset,
+                                        beam_size=beam_size,
+                                        num_expansions=num_expansions,
+                                        max_complexity=max_complexity,
+                                        surrogate_model=surrogate_model,
+                                        metric=monitor,
+                                        checkpoint_frequency=checkpoint_freq,
+                                        output_dir=OUTPUT_DIR,
+                                        results_dir=RESULTS_DIR,
+                                        # Special parameters for PNAS+ENAS integration
+                                        use_shared_weights=True,
+                                        shared_weights_importance=shared_weights_importance
+                                    )
+                                else:
+                                    # Standard PNAS search
+                                    search = PNASSearch(
+                                        architecture_space=components['architecture_space'],
+                                        evaluator=evaluator,
+                                        dataset_name=selected_dataset,
+                                        beam_size=beam_size,
+                                        num_expansions=num_expansions,
+                                        max_complexity=max_complexity,
+                                        surrogate_model=surrogate_model,
+                                        metric=monitor,
+                                        checkpoint_frequency=checkpoint_freq,
+                                        output_dir=OUTPUT_DIR,
+                                        results_dir=RESULTS_DIR
+                                    )
+                    
+                    # If not resuming or if creating search object failed, create a new one
+                    if search is None:
+                        # Create new search object based on selected method
+                        if search_method == "Evolutionary Search":
+                            # Create new evolutionary search with user-selected progressive search setting
+                            search = EvolutionarySearch(
+                                architecture_space=components['architecture_space'],
+                                evaluator=evaluator,
+                                dataset_name=selected_dataset,
+                                population_size=population_size,
+                                mutation_rate=mutation_rate,
+                                generations=num_iterations,
+                                elite_size=2,
+                                tournament_size=3,
+                                metric=monitor,
+                                save_history=True,
+                                enable_progressive=enable_progressive,  # User-controlled progressive search
+                                checkpoint_frequency=checkpoint_freq  # Save checkpoints periodically
+                            )
+                        elif search_method == "PNAS+ENAS (Combined)":
+                            # Create a new surrogate model
+                            surrogate_model = SurrogateModel(device=device)
+                            
+                            # Create hybrid PNAS+ENAS search
+                            search = PNASSearch(
+                                architecture_space=components['architecture_space'],
+                                evaluator=evaluator,
+                                dataset_name=selected_dataset,
+                                beam_size=beam_size,
+                                num_expansions=num_expansions,
+                                max_complexity=max_complexity,
+                                surrogate_model=surrogate_model,
+                                metric=monitor,
+                                checkpoint_frequency=checkpoint_freq,
+                                output_dir=OUTPUT_DIR,
+                                results_dir=RESULTS_DIR,
+                                # Special parameters for PNAS+ENAS integration
+                                use_shared_weights=True,
+                                shared_weights_importance=shared_weights_importance
+                            )
+                        elif search_method == "PNAS (Progressive Neural Architecture Search)":
+                            # Create a new surrogate model
+                            surrogate_model = SurrogateModel(device=device)
+                            
+                            # Create standard PNAS search
+                            search = PNASSearch(
+                                architecture_space=components['architecture_space'],
+                                evaluator=evaluator,
+                                dataset_name=selected_dataset,
+                                beam_size=beam_size,
+                                num_expansions=num_expansions,
+                                max_complexity=max_complexity,
+                                surrogate_model=surrogate_model,
+                                metric=monitor,
+                                checkpoint_frequency=checkpoint_freq,
+                                output_dir=OUTPUT_DIR,
+                                results_dir=RESULTS_DIR
+                            )
+                        elif search_method == "ENAS (Efficient Neural Architecture Search)":
+                            # Create ENAS search
+                            search = ENASSearch(
+                                architecture_space=components['architecture_space'],
+                                evaluator=evaluator,
+                                dataset_name=selected_dataset,
+                                controller_sample_count=controller_sample_count,
+                                controller_entropy_weight=controller_entropy_weight,
+                                weight_sharing_max_models=weight_sharing_max_models,
+                                num_iterations=num_iterations,
+                                metric=monitor,
+                                checkpoint_frequency=checkpoint_freq,
+                                output_dir=OUTPUT_DIR,
+                                results_dir=RESULTS_DIR
+                            )
+                        # PNAS+ENAS case is now handled above, along with the PNAS case
+                    
+                    # search object validity will be checked later
+                    
+                    # Force specific network type if not "all"
+                    if network_type != "all":
+                        # Override the network_type in the sample_random_architecture method
+                        original_sample = search.architecture_space.sample_random_architecture
+                        
+                        # Create wrapped function that forces network_type
+                        def sample_with_fixed_type():
+                            arch = original_sample()
+                            arch['network_type'] = network_type
+                            return arch
+                        
+                        # Replace the method
+                        search.architecture_space.sample_random_architecture = sample_with_fixed_type
+                
+                # Create placeholders for progress bars - now that we have a search object
+                progress_header = st.empty()
+                progress_bar_placeholder = st.empty()
+                
+                sub_progress_header = st.empty()
+                sub_progress_bar_placeholder = st.empty()
+                
+                # Text for status updates
+                status_text = st.empty()
+                    
+                # Now create the actual progress bars with initial values
+                progress_header.write("Overall Progress:")
+                progress_bar = progress_bar_placeholder.progress(0.0)
+                
+                sub_progress_header.write("Current Phase Progress:")
+                sub_progress_bar = sub_progress_bar_placeholder.progress(0.0)
+                
+                # We need to use a bit of a sleep to allow the UI to refresh
+                time.sleep(0.5)
+                
+                # Make sure we have a valid search object before proceeding
+                if search is None:
+                    error_placeholder.error("Search object was not properly initialized. Check configuration.")
+                    st.session_state.search_running = False
+                    st.session_state.search_stopped = False
                     return
                 
-                # Create evaluator with parameter sharing enabled by default
-                evaluator = Evaluator(
-                    dataset_registry=components['dataset_registry'],
-                    model_builder=components['model_builder'],
-                    device=device,
-                    max_epochs=max_epochs,
-                    patience=patience,
-                    min_delta=min_delta,
-                    monitor=monitor,
-                    enable_weight_sharing=True,  # Parameter sharing always enabled
-                    weight_sharing_max_models=100  # Keep up to 100 models in the sharing pool
-                )
+                # Run the appropriate search method
+                if search_method == "Evolutionary Search":
+                    # Run evolutionary search with progress updates
+                    status_text.text("Starting Evolutionary Search: Initializing population...")
+                    search.initialize_population()
+                    
+                    for generation in range(num_iterations):
+                        # Check if user requested to stop the search
+                        if st.session_state.search_stopped:
+                            status_text.text(f"Evolutionary Search: Stopping after generation {generation}/{num_iterations}")
+                            st.warning(f"Search stopped at generation {generation}/{num_iterations}")
+                            break
+                        
+                        # Update status and progress
+                        progress = (generation + 1) / num_iterations
+                        progress_bar.progress(progress)
+                        status_text.text(f"Evolutionary Search: Generation {generation + 1}/{num_iterations}")
+                        
+                        # For progressive search, check if complexity should be increased
+                        if search.enable_progressive:
+                            # Update complexity level at transition points
+                            transition_point = (search.complexity_level * num_iterations) // (search.max_complexity_level + 1)
+                            if generation >= transition_point and search.complexity_level < search.max_complexity_level:
+                                search.complexity_level += 1
+                                st.text(f"Increasing architecture complexity to level {search.complexity_level}")
+                            
+                            # Add current complexity level to history
+                            if search.save_history:
+                                search.history['complexity_level'].append(search.complexity_level)
+                        elif search.save_history and 'complexity_level' not in search.history:
+                            # Initialize complexity_level key in history for non-progressive search
+                            search.history['complexity_level'] = []
+                        
+                        # Save checkpoint if needed
+                        if checkpoint_freq > 0 and generation > 0 and generation % checkpoint_freq == 0:
+                            timestamp = time.strftime("%Y%m%d-%H%M%S")
+                            checkpoint_filename = f"{selected_dataset}_checkpoint_gen{generation}_{timestamp}.pkl"
+                            checkpoint_path = os.path.join(RESULTS_DIR, checkpoint_filename)
+                            
+                            # Create checkpoint data
+                            checkpoint_data = {
+                                'population': search.population,
+                                'fitness_scores': search.fitness_scores,
+                                'best_architecture': search.best_architecture if hasattr(search, 'best_architecture') else None,
+                                'best_fitness': search.best_fitness if hasattr(search, 'best_fitness') else None,
+                                'history': search.history,
+                                'generation': generation,
+                                'complexity_level': search.complexity_level if hasattr(search, 'complexity_level') else None,
+                                'dataset_name': selected_dataset
+                            }
+                            
+                            # Save checkpoint
+                            with open(checkpoint_path, 'wb') as f:
+                                pickle.dump(checkpoint_data, f)
+                            
+                            status_text.text(f"Evolutionary Search: Checkpoint saved at generation {generation}")
+                        
+                        # Use fast mode for early generations
+                        use_fast_mode = generation < fast_mode_iterations
+                        
+                        # Evaluate population
+                        if parallel_evaluator and not use_fast_mode:
+                            # Use parallel evaluation for regular evaluation
+                            fitness_scores = parallel_evaluator.evaluate_architectures(
+                                search.population, selected_dataset, fast_mode=use_fast_mode
+                            )
+                            search.fitness_scores = fitness_scores
+                        else:
+                            # Use standard evaluation
+                            search.evaluate_population(fast_mode=use_fast_mode)
+                        
+                        # Record statistics for this generation
+                        if len(search.fitness_scores) > 0:
+                            if search.higher_is_better:
+                                best_fitness = max(search.fitness_scores)
+                                best_idx = search.fitness_scores.index(best_fitness)
+                            else:
+                                best_fitness = min(search.fitness_scores)
+                                best_idx = search.fitness_scores.index(best_fitness)
+                            
+                            avg_fitness = sum(search.fitness_scores) / len(search.fitness_scores)
+                            best_arch = search.population[best_idx].copy()
+                            diversity = search.calculate_diversity()
+                            
+                            # Save history
+                            if search.save_history:
+                                search.history['generations'].append(generation)
+                                search.history['best_fitness'].append(best_fitness)
+                                search.history['avg_fitness'].append(avg_fitness)
+                                search.history['best_architecture'].append(best_arch)
+                                search.history['population_diversity'].append(diversity)
+                                search.history['evaluation_times'].append(0)  # Placeholder for evaluation times
+                        
+                        # Create next generation (except for last iteration)
+                        if generation < num_iterations - 1:
+                            search.population = search.create_next_generation()
+                    
+                    # Get best architecture and results from evolutionary search
+                    best_architecture = search.best_architecture
+                    best_fitness = search.best_fitness
+                    history = search.history
                 
-                # Set up job distributor if using multiple GPUs
-                if use_gpu and len(gpu_ids) > 1:
-                    job_distributor = JobDistributor(
-                        num_workers=len(gpu_ids),
-                        device_ids=gpu_ids
-                    )
-                    parallel_evaluator = ParallelEvaluator(
-                        evaluator=evaluator,
-                        job_distributor=job_distributor
-                    )
-                else:
-                    parallel_evaluator = None
-                
-                # Check if resuming from checkpoint
-                if selected_checkpoint != "None":
-                    checkpoint_path = os.path.join(RESULTS_DIR, selected_checkpoint)
-                    st.info(f"Resuming search from checkpoint: {selected_checkpoint}")
+                elif search_method == "PNAS (Progressive Neural Architecture Search)":
+                    # Run PNAS search
+                    status_text.text("Starting PNAS search: Generating initial architectures...")
                     
-                    # Load checkpoint data
-                    with open(checkpoint_path, 'rb') as f:
-                        checkpoint_data = pickle.load(f)
+                    # Create a progress update callback that updates the UI
+                    def update_pnas_progress(progress_value, status_message, sub_progress=None, sub_message=None):
+                        # Update main progress bar
+                        progress_bar.progress(float(progress_value))
+                        
+                        # Update status message
+                        main_status = f"PNAS Search: {status_message}"
+                        if sub_message:
+                            main_status += f" | {sub_message}"
+                        status_text.text(main_status)
+                        
+                        # Update sub-progress bar if provided
+                        if sub_progress is not None:
+                            # Force a float value in range [0.0, 1.0]
+                            safe_sub_progress = max(0.0, min(1.0, float(sub_progress)))
+                            sub_progress_bar.progress(safe_sub_progress)
+                            
+                        # Add a tiny sleep to allow the UI to refresh
+                        if sub_progress is not None:
+                            time.sleep(0.05)  # Increased sleep time for better UI refresh
                     
-                    # Create search object with checkpoint data
-                    search = EvolutionarySearch(
-                        architecture_space=components['architecture_space'],
-                        evaluator=evaluator,
-                        dataset_name=selected_dataset,
-                        population_size=population_size,
-                        mutation_rate=mutation_rate,
-                        generations=num_generations,
-                        elite_size=2,
-                        tournament_size=3,
-                        metric=monitor,
-                        save_history=True,
-                        enable_progressive=enable_progressive,
-                        checkpoint_data=checkpoint_data  # Provide checkpoint data
-                    )
-                else:
-                    # Create new evolutionary search with user-selected progressive search setting
-                    search = EvolutionarySearch(
-                        architecture_space=components['architecture_space'],
-                        evaluator=evaluator,
-                        dataset_name=selected_dataset,
-                        population_size=population_size,
-                        mutation_rate=mutation_rate,
-                        generations=num_generations,
-                        elite_size=2,
-                        tournament_size=3,
-                        metric=monitor,
-                        save_history=True,
-                        enable_progressive=enable_progressive,  # User-controlled progressive search
-                        checkpoint_frequency=checkpoint_freq  # Save checkpoints periodically
-                    )
-                
-                # Force specific network type if not "all"
-                if network_type != "all":
-                    # Override the network_type in the sample_random_architecture method
-                    original_sample = search.architecture_space.sample_random_architecture
+                    try:
+                        # Add a check for stop condition
+                        def check_stop_condition():
+                            should_stop = st.session_state.search_stopped
+                            if should_stop:
+                                logging.warning("STOP CONDITION TRIGGERED: User requested stop in PNAS search")
+                            return should_stop
+                            
+                        # PNAS search with progress tracking and stop condition
+                        best_architecture, best_fitness, history = search.search(
+                            resume_from=selected_checkpoint if selected_checkpoint != "None" else None,
+                            progress_callback=update_pnas_progress,  # Pass our callback
+                            stop_condition=check_stop_condition  # Pass stop condition check
+                        )
+                        progress_bar.progress(1.0)
+                        
+                        if st.session_state.search_stopped:
+                            status_text.text("PNAS search stopped by user")
+                        else:
+                            status_text.text("PNAS search completed successfully!")
+                    except Exception as e:
+                        st.error(f"Error during PNAS search: {str(e)}")
+                        # Reset search state
+                        st.session_state.search_running = False
+                        st.session_state.search_stopped = False
+                        return
                     
-                    # Create wrapped function that forces network_type
-                    def sample_with_fixed_type():
-                        arch = original_sample()
-                        arch['network_type'] = network_type
-                        return arch
+                elif search_method == "ENAS (Efficient Neural Architecture Search)":
+                    # Run ENAS search
+                    status_text.text("Starting ENAS search: Initializing controller...")
                     
-                    # Replace the method
-                    search.architecture_space.sample_random_architecture = sample_with_fixed_type
+                    # Create a progress update callback that updates the UI
+                    def update_enas_progress(progress_value, status_message, sub_progress=None, sub_message=None):
+                        # Update main progress bar
+                        progress_bar.progress(float(progress_value))
+                        
+                        # Update status message
+                        main_status = f"ENAS Search: {status_message}"
+                        if sub_message:
+                            main_status += f" | {sub_message}"
+                        status_text.text(main_status)
+                        
+                        # Update sub-progress bar if provided
+                        if sub_progress is not None:
+                            # Force a float value in range [0.0, 1.0]
+                            safe_sub_progress = max(0.0, min(1.0, float(sub_progress)))
+                            sub_progress_bar.progress(safe_sub_progress)
+                            
+                        # Add a tiny sleep to allow the UI to refresh
+                        if sub_progress is not None:
+                            time.sleep(0.05)  # Increased sleep time for better UI refresh
+                    
+                    try:
+                        # Add a check for stop condition
+                        def check_stop_condition():
+                            should_stop = st.session_state.search_stopped
+                            if should_stop:
+                                logging.warning("STOP CONDITION TRIGGERED: User requested stop in ENAS search")
+                            return should_stop
+                            
+                        # ENAS search with progress tracking and stop condition
+                        best_architecture, best_fitness, history = search.search(
+                            resume_from=selected_checkpoint if selected_checkpoint != "None" else None,
+                            progress_callback=update_enas_progress,  # Pass our callback
+                            stop_condition=check_stop_condition  # Pass stop condition check
+                        )
+                        progress_bar.progress(1.0)
+                        
+                        if st.session_state.search_stopped:
+                            status_text.text("ENAS search stopped by user")
+                        else:
+                            status_text.text("ENAS search completed successfully!")
+                    except Exception as e:
+                        st.error(f"Error during ENAS search: {str(e)}")
+                        # Reset search state
+                        st.session_state.search_running = False
+                        st.session_state.search_stopped = False
+                        return
             
-            # Create progress bar
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+                else:  # PNAS+ENAS Combined Search
+                    # Run combined search
+                    status_text.text("Starting PNAS+ENAS (Combined) search...")
+                    
+                    # Create a progress update callback that updates the UI
+                    def update_combined_progress(progress_value, status_message, sub_progress=None, sub_message=None):
+                        # Update main progress bar
+                        progress_bar.progress(float(progress_value))
+                        
+                        # Update status message
+                        main_status = f"PNAS+ENAS Combined: {status_message}"
+                        if sub_message:
+                            main_status += f" | {sub_message}"
+                        status_text.text(main_status)
+                        
+                        # Update sub-progress bar if provided
+                        if sub_progress is not None:
+                            # Force a float value in range [0.0, 1.0]
+                            safe_sub_progress = max(0.0, min(1.0, float(sub_progress)))
+                            sub_progress_bar.progress(safe_sub_progress)
+                            
+                        # Add a tiny sleep to allow the UI to refresh
+                        if sub_progress is not None:
+                            time.sleep(0.05)  # Increased sleep time for better UI refresh
+                    
+                    try:
+                        # Add a check for stop condition
+                        def check_stop_condition():
+                            should_stop = st.session_state.search_stopped
+                            if should_stop:
+                                logging.warning("STOP CONDITION TRIGGERED: User requested stop in PNAS+ENAS Combined search")
+                            return should_stop
+                            
+                        # Combined search with progress tracking and stop condition
+                        best_architecture, best_fitness, history = search.search(
+                            resume_from=selected_checkpoint if selected_checkpoint != "None" else None,
+                            progress_callback=update_combined_progress,  # Pass our callback
+                            stop_condition=check_stop_condition  # Pass stop condition check
+                        )
+                        progress_bar.progress(1.0)
+                        
+                        if st.session_state.search_stopped:
+                            status_text.text("PNAS+ENAS (Combined) search stopped by user")
+                        else:
+                            status_text.text("PNAS+ENAS (Combined) search completed successfully!")
+                    except Exception as e:
+                        st.error(f"Error during PNAS+ENAS (Combined) search: {str(e)}")
+                        # Reset search state
+                        st.session_state.search_running = False
+                        st.session_state.search_stopped = False
+                        return
             
-            # Run search with progress updates
-            status_text.text("Initializing population...")
-            search.initialize_population()
-            
-            for generation in range(num_generations):
-                # Update status and progress
-                progress = (generation + 1) / num_generations
-                progress_bar.progress(progress)
-                status_text.text(f"Generation {generation + 1}/{num_generations}")
-                
-                # For progressive search, check if complexity should be increased
-                if search.enable_progressive:
-                    # Update complexity level at transition points
-                    transition_point = (search.complexity_level * num_generations) // (search.max_complexity_level + 1)
-                    if generation >= transition_point and search.complexity_level < search.max_complexity_level:
-                        search.complexity_level += 1
-                        st.text(f"Increasing architecture complexity to level {search.complexity_level}")
+                    # Add metric type to history for proper visualization
+                    history['metric'] = monitor
+                    history['metric_type'] = 'loss' if monitor.endswith('loss') else 'accuracy'
                     
-                    # Add current complexity level to history
-                    if search.save_history:
-                        search.history['complexity_level'].append(search.complexity_level)
-                elif search.save_history and 'complexity_level' not in search.history:
-                    # Initialize complexity_level key in history for non-progressive search
-                    search.history['complexity_level'] = []
-                
-                # Save checkpoint if needed
-                if checkpoint_freq > 0 and generation > 0 and generation % checkpoint_freq == 0:
-                    timestamp = time.strftime("%Y%m%d-%H%M%S")
-                    checkpoint_filename = f"{selected_dataset}_checkpoint_gen{generation}_{timestamp}.pkl"
-                    checkpoint_path = os.path.join(RESULTS_DIR, checkpoint_filename)
-                    
-                    # Create checkpoint data
-                    checkpoint_data = {
-                        'population': search.population,
-                        'fitness_scores': search.fitness_scores,
-                        'best_architecture': search.best_architecture if hasattr(search, 'best_architecture') else None,
-                        'best_fitness': search.best_fitness if hasattr(search, 'best_fitness') else None,
-                        'history': search.history,
-                        'generation': generation,
-                        'complexity_level': search.complexity_level if hasattr(search, 'complexity_level') else None,
-                        'dataset_name': selected_dataset
-                    }
-                    
-                    # Save checkpoint
-                    with open(checkpoint_path, 'wb') as f:
-                        pickle.dump(checkpoint_data, f)
-                    
-                    status_text.text(f"Checkpoint saved at generation {generation} to {checkpoint_filename}")
-                
-                # Use fast mode for early generations
-                use_fast_mode = generation < fast_mode_gens
-                
-                # Evaluate population
-                if parallel_evaluator and not use_fast_mode:
-                    # Use parallel evaluation for regular evaluation
-                    fitness_scores = parallel_evaluator.evaluate_architectures(
-                        search.population, selected_dataset, fast_mode=use_fast_mode
+                    # Save results
+                    result_filename = save_search_results(
+                        selected_dataset, history, best_architecture, best_fitness
                     )
-                    search.fitness_scores = fitness_scores
-                else:
-                    # Use standard evaluation
-                    search.evaluate_population(fast_mode=use_fast_mode)
-                
-                # Record statistics for this generation
-                if len(search.fitness_scores) > 0:
-                    if search.higher_is_better:
-                        best_fitness = max(search.fitness_scores)
-                        best_idx = search.fitness_scores.index(best_fitness)
+                    
+                    # Update status
+                    progress_bar.progress(1.0)
+                    
+                    # Check if search was stopped by user
+                    if st.session_state.search_stopped:
+                        status_text.text(f"Search stopped by user. Best fitness so far: {best_fitness:.4f}")
+                        st.warning(f"""
+                        ### Search Stopped
+                        - Search was interrupted by user request
+                        - Best validation accuracy: {best_fitness:.4f}
+                        - Architecture depth: {best_architecture['num_layers']} layers
+                        - Partial results saved as: {result_filename}
+                        """)
                     else:
-                        best_fitness = min(search.fitness_scores)
-                        best_idx = search.fitness_scores.index(best_fitness)
+                        status_text.text(f"Search completed! Best fitness: {best_fitness:.4f}")
+                        # Show summary
+                        st.success(f"""
+                        ### Search Completed
+                        - Best validation accuracy: {best_fitness:.4f}
+                        - Architecture depth: {best_architecture['num_layers']} layers
+                        - Results saved as: {result_filename}
+                        """)
                     
-                    avg_fitness = sum(search.fitness_scores) / len(search.fitness_scores)
-                    best_arch = search.population[best_idx].copy()
-                    diversity = search.calculate_diversity()
+                    # Reset search running state
+                    st.session_state.search_running = False
+                    st.session_state.search_stopped = False
+            
+                    # Create visualizer and show plots
+                    visualizer = SearchVisualizer(components['architecture_space'])
                     
-                    # Save history
-                    if search.save_history:
-                        search.history['generations'].append(generation)
-                        search.history['best_fitness'].append(best_fitness)
-                        search.history['avg_fitness'].append(avg_fitness)
-                        search.history['best_architecture'].append(best_arch)
-                        search.history['population_diversity'].append(diversity)
-                        search.history['evaluation_times'].append(0)  # Placeholder for evaluation times
-                
-                # Create next generation (except for last iteration)
-                if generation < num_generations - 1:
-                    search.population = search.create_next_generation()
-            
-            # Get best architecture and save results
-            best_architecture = search.best_architecture
-            best_fitness = search.best_fitness
-            history = search.history
-            
-            # Add metric type to history for proper visualization
-            history['metric'] = monitor
-            history['metric_type'] = 'loss' if monitor.endswith('loss') else 'accuracy'
-            
-            # Save results
-            result_filename = save_search_results(
-                selected_dataset, history, best_architecture, best_fitness
-            )
-            
-            # Update status
-            progress_bar.progress(1.0)
-            status_text.text(f"Search completed! Best fitness: {best_fitness:.4f}")
-            
-            # Show summary
-            st.success(f"""
-            ### Search Completed
-            - Best validation accuracy: {best_fitness:.4f}
-            - Architecture depth: {best_architecture['num_layers']} layers
-            - Results saved as: {result_filename}
-            """)
-            
-            # Create visualizer and show plots
-            visualizer = SearchVisualizer(components['architecture_space'])
-            
-            # Plot search progress
-            st.subheader("Search Progress")
-            fig = visualizer.plot_search_progress(history, metric="multiple")
-            st.pyplot(fig)
-            
-            # Plot best architecture
-            st.subheader("Best Architecture")
-            
-            # Visualize network graph
-            fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
-            st.pyplot(fig)
-            
-            # Add model summary
-            st.subheader("Model Summary")
-            try:
-                if TORCH_AVAILABLE:
-                    model = components['model_builder'].build_model(best_architecture)
+                    # Plot search progress
+                    st.subheader("Search Progress")
+                    fig = visualizer.plot_search_progress(history, metric="multiple")
+                    st.pyplot(fig)
                     
-                    # Count parameters
-                    total_params = sum(p.numel() for p in model.parameters())
-                    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                    # Plot best architecture
+                    st.subheader("Best Architecture")
                     
-                    # Display summary
-                    st.markdown(f"""
-                    - **Total Parameters**: {total_params:,}
-                    - **Trainable Parameters**: {trainable_params:,}
-                    """)
+                    # Visualize network graph
+                    fig = visualizer.visualize_architecture_networks([best_architecture], ["Best Architecture"])
+                    st.pyplot(fig)
                     
-                    # Display model structure
-                    st.code(str(model))
-                else:
-                    st.warning("PyTorch is not available. Cannot display model summary.")
-            except Exception as e:
-                st.warning(f"Could not generate model summary: {e}")
+                    # Add model summary
+                    st.subheader("Model Summary")
+                    try:
+                        if TORCH_AVAILABLE:
+                            model = components['model_builder'].build_model(best_architecture)
+                            
+                            # Count parameters
+                            total_params = sum(p.numel() for p in model.parameters())
+                            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                            
+                            # Display summary
+                            st.markdown(f"""
+                            - **Total Parameters**: {total_params:,}
+                            - **Trainable Parameters**: {trainable_params:,}
+                            """)
+                            
+                            # Display model structure
+                            st.code(str(model))
+                        else:
+                            st.warning("PyTorch is not available. Cannot display model summary.")
+                    except Exception as e:
+                        st.warning(f"Could not generate model summary: {e}")
 
     # Results tab
     with tab2:

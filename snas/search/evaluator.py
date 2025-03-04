@@ -557,6 +557,84 @@ class Evaluator:
         
         return model, any_weights_loaded
     
+    def estimate_performance_from_shared_weights(self, architecture, dataset_name, metric='val_acc'):
+        """
+        Estimate the performance of an architecture using the shared weights pool.
+        This is used by the PNAS+ENAS combined approach to leverage weight sharing
+        for fast performance estimation.
+        
+        Args:
+            architecture: Architecture to estimate performance for
+            dataset_name: Name of the dataset
+            metric: The metric to use for performance estimation
+            
+        Returns:
+            float or None: Estimated performance, or None if no good match found
+        """
+        if not self.enable_weight_sharing:
+            return None
+            
+        network_type = architecture.get('network_type', 'cnn')
+        
+        # If no shared weights for this network type, return None
+        if not network_type in self.shared_param_pools or not self.shared_param_pools[network_type]:
+            return None
+            
+        # Find the most compatible weights
+        try:
+            # Build model to get structure
+            model, _, _, _ = self._build_with_weight_sharing(architecture)
+            
+            # Get the top 3 candidates
+            candidates = []
+            
+            for entry in self.shared_param_pools[network_type]:
+                shared_arch = entry['architecture']
+                
+                # Get the appropriate performance value based on the metric
+                if metric == 'val_acc':
+                    idx = network_type in self.shared_weight_performance and len(self.shared_weight_performance[network_type]) > 0
+                    if idx:
+                        performance = self.shared_weight_performance[network_type][-1]['val_acc']
+                    else:
+                        performance = entry['performance'] if self.monitor == 'val_acc' else 0.0
+                else:  # val_loss
+                    idx = network_type in self.shared_weight_performance and len(self.shared_weight_performance[network_type]) > 0
+                    if idx:
+                        performance = self.shared_weight_performance[network_type][-1]['val_loss']
+                    else:
+                        performance = entry['performance'] if self.monitor == 'val_loss' else float('inf')
+                
+                # Calculate similarity score
+                similarity = self._calculate_architecture_similarity(architecture, shared_arch)
+                
+                # Only include if similarity is above threshold
+                if similarity > 0.7:  # Threshold for considering a match
+                    candidates.append({
+                        'similarity': similarity,
+                        'performance': performance
+                    })
+                    
+            # If no good candidates, return None
+            if not candidates:
+                return None
+                
+            # Sort by similarity
+            candidates.sort(key=lambda x: x['similarity'], reverse=True)
+            
+            # Get top candidates (up to 3)
+            top_candidates = candidates[:min(3, len(candidates))]
+            
+            # Calculate weighted average of performances based on similarity
+            total_similarity = sum(c['similarity'] for c in top_candidates)
+            weighted_performance = sum(c['similarity'] * c['performance'] for c in top_candidates) / total_similarity
+            
+            return weighted_performance
+            
+        except Exception as e:
+            logger.warning(f"Error estimating performance from shared weights: {str(e)}")
+            return None
+    
     def _update_shared_parameter_pool(self, model, architecture, val_acc, val_loss):
         """
         Update the shared parameter pool with the current model's weights.
