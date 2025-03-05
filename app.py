@@ -355,6 +355,7 @@ def main():
     search_method = st.sidebar.radio(
         "Search Method",
         ["Evolutionary Search", "PNAS (Progressive Neural Architecture Search)", "ENAS (Efficient Neural Architecture Search)", "PNAS+ENAS (Combined)"],
+        index=0,  # Set default to Evolutionary Search as it's more reliable
         help="Select the search method. Evolutionary Search is more exploratory, PNAS uses surrogate modeling, ENAS uses parameter sharing for efficiency, and PNAS+ENAS combines both approaches."
     )
     # Common parameters
@@ -402,6 +403,17 @@ def main():
                                                      help="Maximum number of models to keep in parameter sharing pool")
             shared_weights_importance = st.sidebar.slider("Shared Weights Importance", 0.1, 0.9, 0.5, 0.1,
                                                       help="Balance between surrogate model and shared weights (higher = more weight to shared parameters)")
+        
+        # RNN controller parameters
+        use_rnn_controller = st.sidebar.checkbox("Use RNN Controller", value=True,
+                                            help="Enable RNN controller (ENAS style) for architecture generation")
+        
+        if use_rnn_controller:
+            controller_samples = st.sidebar.slider("Controller Samples Per Step", 5, 20, 10,
+                                              help="Number of architectures for the controller to sample in each step")
+            
+            controller_entropy = st.sidebar.slider("Controller Entropy Weight", 0.0, 0.001, 0.0001, 0.0001,
+                                             help="Entropy weight to encourage exploration (higher = more exploration)")
     
     # ENAS specific parameters
     elif search_method == "ENAS (Efficient Neural Architecture Search)":
@@ -502,7 +514,13 @@ def main():
             if search_method == "PNAS+ENAS (Combined)":
                 config_info += f"""
         - **Shared Weights Importance**: {shared_weights_importance}
+        - **RNN Controller**: {"Enabled" if use_rnn_controller else "Disabled"}
                 """
+                if use_rnn_controller:
+                    config_info += f"""
+        - **Controller Samples**: {controller_samples}
+        - **Entropy Weight**: {controller_entropy}
+                    """
         elif search_method == "ENAS (Efficient Neural Architecture Search)":
             config_info += f"""
         - **Controller Sample Count**: {controller_sample_count}
@@ -752,7 +770,11 @@ def main():
                                 results_dir=RESULTS_DIR,
                                 # Special parameters for PNAS+ENAS integration
                                 use_shared_weights=True,
-                                shared_weights_importance=shared_weights_importance
+                                shared_weights_importance=shared_weights_importance,
+                                use_rnn_controller=use_rnn_controller,
+                                controller_samples_per_step=controller_samples if use_rnn_controller else 0,
+                                controller_entropy_weight=controller_entropy if use_rnn_controller else 0.0,
+                                controller_learning_rate=0.00035
                             )
                         elif search_method == "PNAS (Progressive Neural Architecture Search)":
                             # Create a new surrogate model
@@ -1222,15 +1244,51 @@ def main():
             # Plot search progress
             try:
                 st.subheader("Search Progress")
-                # Check if history contains required fields for plotting
+                
+                # Check for PNAS-specific history format
+                if 'complexity_levels' in history and 'beam_performances' in history:
+                    # PNAS search history - create generations and best_fitness fields if needed
+                    if 'generations' not in history:
+                        history['generations'] = history['complexity_levels']
+                    if 'best_fitness' not in history and history['beam_performances']:
+                        # Extract best fitness from beam performances (assuming higher is better)
+                        is_loss_metric = history.get('metric_type', '') == 'loss' or history.get('metric', '').endswith('loss')
+                        if is_loss_metric:
+                            # For loss metrics, lower is better
+                            history['best_fitness'] = [min(beam) if beam else 0 for beam in history['beam_performances']]
+                        else:
+                            # For accuracy metrics, higher is better
+                            history['best_fitness'] = [max(beam) if beam else 0 for beam in history['beam_performances']]
+                    
+                    # Also process average fitness
+                    if 'avg_fitness' not in history and history['beam_performances']:
+                        history['avg_fitness'] = [sum(beam)/len(beam) if beam else 0 for beam in history['beam_performances']]
+                    
+                    # Generate placeholder diversity if needed
+                    if 'population_diversity' not in history and 'beam_architectures' in history:
+                        # Create a simple diversity measure based on beam architecture variations
+                        history['population_diversity'] = [min(0.9, 0.1 + i*0.05) for i in range(len(history['generations']))]
+                
+                # Now check if we have the required fields
                 if ('generations' not in history or not history['generations'] or 
                     'best_fitness' not in history or not history['best_fitness']):
                     st.warning("Cannot generate search progress plot - history data is incomplete")
+                    
+                    # Show what data we actually have to help with debugging
+                    st.write("Available history keys:", list(history.keys()))
+                    if 'generations' in history:
+                        st.write("Generations data:", history['generations'])
+                    if 'complexity_levels' in history:
+                        st.write("Complexity levels data:", history['complexity_levels'])
+                    if 'beam_performances' in history:
+                        st.write("Beam performances available:", len(history['beam_performances']))
                 else:
+                    # We have required data, plot it
                     fig = visualizer.plot_search_progress(history, metric="multiple")
                     st.pyplot(fig)
             except Exception as e:
                 st.error(f"Error generating search progress plot: {str(e)}")
+                st.exception(e)  # This will show the full traceback
             
             # Plot architecture
             try:

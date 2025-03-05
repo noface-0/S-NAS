@@ -109,17 +109,19 @@ class ResidualBlock(nn.Module):
     """A residual block with skip connection."""
     
     def __init__(self, in_channels, out_channels, kernel_size, 
-                 activation='relu', use_batch_norm=False, dropout_rate=0.0):
+                 activation='relu', use_batch_norm=False, dropout_rate=0.0,
+                 stride=1, downsample=None):
         super(ResidualBlock, self).__init__()
         
         # Calculate padding to maintain spatial dimensions
         padding = kernel_size // 2
         
-        # First conv layer
+        # First conv layer (with stride)
         self.conv1 = nn.Conv2d(
             in_channels=in_channels, 
             out_channels=out_channels,
             kernel_size=kernel_size,
+            stride=stride,
             padding=padding
         )
         
@@ -128,6 +130,7 @@ class ResidualBlock(nn.Module):
             in_channels=out_channels, 
             out_channels=out_channels,
             kernel_size=kernel_size,
+            stride=1,
             padding=padding
         )
         
@@ -155,13 +158,17 @@ class ResidualBlock(nn.Module):
         if dropout_rate > 0:
             self.dropout = nn.Dropout2d(dropout_rate)
         
+        # Downsample option for residual path
+        self.downsample = downsample
+        
         # Skip connection with 1x1 conv if dimensions don't match
-        self.use_shortcut = in_channels != out_channels
+        self.use_shortcut = in_channels != out_channels and downsample is None
         if self.use_shortcut:
             self.shortcut = nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=out_channels,
                 kernel_size=1,
+                stride=stride,
                 padding=0
             )
     
@@ -179,8 +186,11 @@ class ResidualBlock(nn.Module):
         if self.use_batch_norm:
             out = self.bn2(out)
         
+        # Apply downsample path if provided
+        if self.downsample is not None:
+            identity = self.downsample(x)
         # Apply shortcut connection if needed
-        if self.use_shortcut:
+        elif self.use_shortcut:
             identity = self.shortcut(x)
         
         # Add skip connection (with shape check)
@@ -192,7 +202,8 @@ class ResidualBlock(nn.Module):
                 self.shape_adjuster = nn.Conv2d(
                     in_channels=identity.size(1),
                     out_channels=out.size(1),
-                    kernel_size=1
+                    kernel_size=1,
+                    stride=1 if out.shape[2] == identity.shape[2] else 2
                 ).to(out.device)
             identity_adjusted = self.shape_adjuster(identity)
             out = out + identity_adjusted
@@ -826,6 +837,12 @@ class ShuffleBlock(nn.Module):
         # Channel shuffle: [N, C, H, W] -> [N, g, C//g, H, W] -> [N, C//g, g, H, W] -> [N, C, H, W]
         N, C, H, W = x.size()
         g = self.groups
+        # Handle the case where C is not divisible by g
+        if C % g != 0:
+            # Ensure we have a proper division
+            g = math.gcd(C, g)  # Find greatest common divisor
+            if g <= 1:  # Fallback if no common divisor
+                return x  # Skip shuffling
         return x.view(N, g, C//g, H, W).transpose(1, 2).contiguous().view(N, C, H, W)
 
 
@@ -1303,6 +1320,397 @@ class EfficientNetModel(nn.Module):
         x = x.view(x.size(0), -1)
         x = self.dropout(x)
         x = self.classifier(x)
+        
+        return x
+
+
+class ResNetModel(nn.Module):
+    """ResNet model built from an architecture configuration."""
+    
+    def __init__(self, architecture):
+        """
+        Initialize the ResNet model based on the architecture specification.
+        
+        Args:
+            architecture: Dictionary specifying the architecture
+        """
+        super(ResNetModel, self).__init__()
+        self.architecture = architecture
+        
+        # Extract architecture parameters
+        input_shape = architecture['input_shape']
+        num_classes = architecture['num_classes']
+        num_layers = architecture['num_layers']
+        filters = architecture['filters']
+        kernel_sizes = architecture['kernel_sizes']
+        activations = architecture['activations']
+        use_batch_norm = architecture.get('use_batch_norm', True)
+        dropout_rate = architecture.get('dropout_rate', 0.0)
+        
+        # Initial convolutional layer
+        self.conv1 = nn.Conv2d(input_shape[0], filters[0], kernel_size=7, stride=2, padding=3, bias=False)
+        if use_batch_norm:
+            self.bn1 = nn.BatchNorm2d(filters[0])
+        
+        # First activation
+        if activations[0] == 'relu':
+            self.activation = nn.ReLU(inplace=True)
+        elif activations[0] == 'leaky_relu':
+            self.activation = nn.LeakyReLU(0.1, inplace=True)
+        elif activations[0] == 'elu':
+            self.activation = nn.ELU(inplace=True)
+        elif activations[0] == 'selu':
+            self.activation = nn.SELU(inplace=True)
+        else:
+            self.activation = nn.ReLU(inplace=True)  # Default to ReLU
+        
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        
+        # Residual blocks
+        self.layers = nn.ModuleList()
+        in_channels = filters[0]
+        for i in range(num_layers - 1):  # -1 because we already have one layer
+            out_channels = filters[min(i+1, len(filters)-1)]
+            kernel_size = kernel_sizes[min(i+1, len(kernel_sizes)-1)]
+            activation = activations[min(i+1, len(activations)-1)]
+            
+            # Create downsample layer if dimensions change
+            downsample = None
+            stride = 1
+            if in_channels != out_channels:
+                stride = 2  # Downsample when channels change
+                downsample = nn.Sequential(
+                    nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                    nn.BatchNorm2d(out_channels) if use_batch_norm else nn.Identity()
+                )
+            
+            # Add residual block
+            block = ResidualBlock(
+                in_channels, 
+                out_channels, 
+                kernel_size, 
+                activation=activation,
+                use_batch_norm=use_batch_norm,
+                dropout_rate=dropout_rate,
+                stride=stride,
+                downsample=downsample
+            )
+            
+            self.layers.append(block)
+            in_channels = out_channels
+        
+        # Global average pooling and classifier
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(in_channels, num_classes)
+        
+        # Use dropout if specified
+        self.dropout_rate = dropout_rate
+        if dropout_rate > 0:
+            self.dropout = nn.Dropout(dropout_rate)
+    
+    def forward(self, x):
+        # Initial convolution
+        x = self.conv1(x)
+        if hasattr(self, 'bn1'):
+            x = self.bn1(x)
+        x = self.activation(x)
+        x = self.maxpool(x)
+        
+        # Residual blocks
+        for layer in self.layers:
+            x = layer(x)
+        
+        # Global average pooling
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        
+        # Dropout if needed
+        if self.dropout_rate > 0:
+            x = self.dropout(x)
+        
+        # Classification
+        x = self.fc(x)
+        
+        return x
+
+
+class MobileNetModel(nn.Module):
+    """MobileNet model built from an architecture configuration."""
+    
+    def __init__(self, architecture):
+        """
+        Initialize the MobileNet model based on the architecture specification.
+        
+        Args:
+            architecture: Dictionary specifying the architecture
+        """
+        super(MobileNetModel, self).__init__()
+        self.architecture = architecture
+        
+        # Extract architecture parameters
+        input_shape = architecture['input_shape']
+        num_classes = architecture['num_classes']
+        num_layers = architecture['num_layers']
+        filters = architecture['filters']
+        kernel_sizes = architecture['kernel_sizes']
+        activations = architecture['activations']
+        use_batch_norm = architecture.get('use_batch_norm', True)
+        dropout_rate = architecture.get('dropout_rate', 0.0)
+        width_multiplier = architecture.get('width_multiplier', 1.0)
+        
+        # Initial convolutional layer
+        initial_filters = max(8, int(32 * width_multiplier))
+        self.conv1 = nn.Conv2d(input_shape[0], initial_filters, kernel_size=3, stride=2, padding=1, bias=False)
+        if use_batch_norm:
+            self.bn1 = nn.BatchNorm2d(initial_filters)
+        
+        # First activation
+        if activations[0] == 'relu':
+            self.activation = nn.ReLU(inplace=True)
+        elif activations[0] == 'leaky_relu':
+            self.activation = nn.LeakyReLU(0.1, inplace=True)
+        elif activations[0] == 'elu':
+            self.activation = nn.ELU(inplace=True)
+        elif activations[0] == 'selu':
+            self.activation = nn.SELU(inplace=True)
+        else:
+            self.activation = nn.ReLU(inplace=True)  # Default to ReLU
+        
+        # Depthwise separable convolutional blocks
+        self.layers = nn.ModuleList()
+        in_channels = initial_filters
+        
+        for i in range(num_layers):
+            out_channels = max(8, int(filters[min(i, len(filters)-1)] * width_multiplier))
+            kernel_size = kernel_sizes[min(i, len(kernel_sizes)-1)]
+            activation = activations[min(i, len(activations)-1)]
+            
+            # Stride = 2 for some layers to reduce spatial dimensions
+            stride = 2 if i in [1, 3, 5, 11] and i < len(filters) else 1
+            
+            # Add depthwise separable block
+            block = DepthwiseSeparableBlock(
+                in_channels, 
+                out_channels, 
+                kernel_size, 
+                activation=activation,
+                use_batch_norm=use_batch_norm,
+                dropout_rate=dropout_rate,
+                width_multiplier=width_multiplier
+            )
+            
+            self.layers.append(block)
+            in_channels = out_channels
+        
+        # Global average pooling and classifier
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(in_channels, num_classes)
+        
+        # Use dropout if specified
+        self.dropout_rate = dropout_rate
+        if dropout_rate > 0:
+            self.dropout = nn.Dropout(dropout_rate)
+    
+    def forward(self, x):
+        # Initial convolution
+        x = self.conv1(x)
+        if hasattr(self, 'bn1'):
+            x = self.bn1(x)
+        x = self.activation(x)
+        
+        # Depthwise separable blocks
+        for layer in self.layers:
+            x = layer(x)
+        
+        # Global average pooling
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        
+        # Dropout if needed
+        if self.dropout_rate > 0:
+            x = self.dropout(x)
+        
+        # Classification
+        x = self.fc(x)
+        
+        return x
+
+
+class DenseNetModel(nn.Module):
+    """DenseNet model built from an architecture configuration."""
+    
+    def __init__(self, architecture):
+        """
+        Initialize the DenseNet model based on the architecture specification.
+        
+        Args:
+            architecture: Dictionary specifying the architecture
+        """
+        super(DenseNetModel, self).__init__()
+        self.architecture = architecture
+        
+        # Extract architecture parameters
+        input_shape = architecture['input_shape']
+        num_classes = architecture['num_classes']
+        growth_rate = architecture.get('growth_rate', 32)
+        block_config = architecture.get('block_config', [6, 12, 24, 16])
+        compression_factor = architecture.get('compression_factor', 0.5)
+        bn_size = architecture.get('bn_size', 4)
+        use_batch_norm = architecture.get('use_batch_norm', True)
+        dropout_rate = architecture.get('dropout_rate', 0.0)
+        
+        # Initial convolution
+        self.features = nn.Sequential()
+        self.features.add_module('conv0', nn.Conv2d(input_shape[0], 2 * growth_rate, 
+                                                   kernel_size=7, stride=2, padding=3, bias=False))
+        if use_batch_norm:
+            self.features.add_module('norm0', nn.BatchNorm2d(2 * growth_rate))
+        self.features.add_module('relu0', nn.ReLU(inplace=True))
+        self.features.add_module('pool0', nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
+        
+        # Each dense block and transition layer
+        num_features = 2 * growth_rate
+        for i, num_layers in enumerate(block_config):
+            # Add a dense block
+            block = _DenseBlock(
+                num_layers=num_layers,
+                num_input_features=num_features,
+                bn_size=bn_size,
+                growth_rate=growth_rate,
+                drop_rate=dropout_rate,
+                activation='relu'
+            )
+            self.features.add_module(f'denseblock{i+1}', block)
+            num_features = num_features + num_layers * growth_rate
+            
+            # Add a transition layer after each dense block except the last one
+            if i != len(block_config) - 1:
+                num_output_features = int(num_features * compression_factor)
+                trans = _Transition(num_features, num_output_features, 'relu')
+                self.features.add_module(f'transition{i+1}', trans)
+                num_features = num_output_features
+        
+        # Final batch norm
+        if use_batch_norm:
+            self.features.add_module('norm_final', nn.BatchNorm2d(num_features))
+        self.features.add_module('relu_final', nn.ReLU(inplace=True))
+        
+        # Global average pooling and classifier
+        self.classifier = nn.Linear(num_features, num_classes)
+        
+        # Use dropout if specified
+        self.dropout_rate = dropout_rate
+        if dropout_rate > 0:
+            self.dropout = nn.Dropout(dropout_rate)
+        
+        # Initialize weights
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x):
+        features = self.features(x)
+        out = F.adaptive_avg_pool2d(features, (1, 1))
+        out = torch.flatten(out, 1)
+        
+        if self.dropout_rate > 0:
+            out = self.dropout(out)
+            
+        out = self.classifier(out)
+        return out
+
+
+class ShuffleNetV2Model(nn.Module):
+    """ShuffleNetV2 model built from an architecture configuration."""
+    
+    def __init__(self, architecture):
+        """
+        Initialize the ShuffleNetV2 model based on the architecture specification.
+        
+        Args:
+            architecture: Dictionary specifying the architecture
+        """
+        super(ShuffleNetV2Model, self).__init__()
+        self.architecture = architecture
+        
+        # Extract architecture parameters
+        input_shape = architecture['input_shape']
+        num_classes = architecture['num_classes']
+        width_multiplier = architecture.get('width_multiplier', 1.0)
+        out_channels = architecture.get('out_channels', [116, 232, 464, 1024])
+        num_blocks_per_stage = architecture.get('num_blocks_per_stage', [4, 8, 4])
+        use_batch_norm = architecture.get('use_batch_norm', True)
+        dropout_rate = architecture.get('dropout_rate', 0.0)
+        
+        input_channels = input_shape[0]
+        
+        # Initial convolution
+        self.conv1 = nn.Conv2d(input_channels, 24, kernel_size=3, stride=2, padding=1, bias=False)
+        if use_batch_norm:
+            self.bn1 = nn.BatchNorm2d(24)
+        self.relu1 = nn.ReLU(inplace=True)
+        
+        # MaxPool
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        
+        # Build stages
+        self.stages = nn.ModuleList()
+        input_channels = 24
+        
+        for i, (num_blocks, output_channels) in enumerate(zip(num_blocks_per_stage, out_channels[:3])):
+            # Apply width multiplier
+            output_channels = int(output_channels * width_multiplier)
+            
+            # First block has stride 2
+            stage = nn.Sequential()
+            stage.add_module(f'block0', ShuffleNetV2Block(input_channels, output_channels, stride=2, activation='relu'))
+            
+            # Rest of blocks have stride 1
+            for j in range(1, num_blocks):
+                stage.add_module(f'block{j}', ShuffleNetV2Block(output_channels, output_channels, stride=1, activation='relu'))
+                
+            self.stages.append(stage)
+            input_channels = output_channels
+        
+        # Final convolution
+        self.conv5 = nn.Conv2d(input_channels, out_channels[3], kernel_size=1, stride=1, padding=0, bias=False)
+        if use_batch_norm:
+            self.bn5 = nn.BatchNorm2d(out_channels[3])
+        self.relu5 = nn.ReLU(inplace=True)
+        
+        # Global pooling and classifier
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
+        self.fc = nn.Linear(out_channels[3], num_classes)
+    
+    def forward(self, x):
+        # Initial layers
+        x = self.conv1(x)
+        if hasattr(self, 'bn1'):
+            x = self.bn1(x)
+        x = self.relu1(x)
+        x = self.maxpool(x)
+        
+        # Stages
+        for stage in self.stages:
+            x = stage(x)
+        
+        # Final convolution
+        x = self.conv5(x)
+        if hasattr(self, 'bn5'):
+            x = self.bn5(x)
+        x = self.relu5(x)
+        
+        # Global pooling and classification
+        x = self.global_pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.dropout(x)
+        x = self.fc(x)
         
         return x
 

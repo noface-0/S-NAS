@@ -152,7 +152,7 @@ def main():
             logger.error(f"Error loading surrogate model: {e}")
             surrogate_model = None
     
-    # Create PNAS search
+    # Create PNAS search with reduced initial architecture count (30 instead of default 100)
     pnas = PNASSearch(
         architecture_space=architecture_space,
         evaluator=evaluator,
