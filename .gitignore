@@ -1,7 +1,7 @@
 # Manually added
 output/
 data/
-notes.txt
+notes.md
 *.sty
 *.pdf
 *.tex

@@ -14,6 +14,8 @@ from snas.architecture.architecture_space import ArchitectureSpace
 from snas.architecture.model_builder import ModelBuilder
 from snas.search.evaluator import Evaluator
 from snas.search.evolutionary_search import EvolutionarySearch
+from snas.search.enas_search import ENASSearch
+from snas.search.pnas.pnas_search import PNASSearch
 from snas.utils.job_distributor import JobDistributor, ParallelEvaluator
 
 # Configure logging
@@ -33,6 +35,11 @@ def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description='S-NAS: Simple Neural Architecture Search')
+
+    # Search method options
+    parser.add_argument('--search-method', type=str, default='evolutionary',
+                       choices=['evolutionary', 'pnas', 'enas'],
+                       help='Neural architecture search method to use')
 
     # Dataset options
     parser.add_argument('--dataset', type=str, default='cifar10',
@@ -139,10 +146,40 @@ def parse_args():
         type=int,
         default=100,
         help='Maximum number of models to keep in the weight sharing pool')
+        
+    # PNAS specific parameters
+    parser.add_argument('--beam-size', type=int, default=10,
+                      help='Number of architectures to keep in the beam (PNAS)')
+    parser.add_argument('--max-complexity', type=int, default=3,
+                      help='Maximum complexity level to explore (PNAS)')
+    parser.add_argument('--num-expansions', type=int, default=5,
+                      help='Number of expansions per architecture in the beam (PNAS)')
+                      
+    # ENAS specific parameters
+    parser.add_argument('--controller-sample-count', type=int, default=50,
+                      help='Number of architectures to sample per iteration (ENAS)')
+    parser.add_argument('--controller-entropy-weight', type=float, default=0.0001,
+                      help='Weight for entropy term in controller update (ENAS)')
+                      
+    # PNAS+ENAS hybrid parameters
+    parser.add_argument('--use-shared-weights', action='store_true',
+                      help='Enable PNAS+ENAS hybrid mode with shared weights')
+    parser.add_argument('--shared-weights-importance', type=float, default=0.5,
+                      help='Balance between surrogate model and shared weights (0.0-1.0)')
+    parser.add_argument('--dynamic-importance-weight', action='store_true',
+                      help='Dynamically adjust importance weight based on surrogate accuracy')
+    
+    # Min and max layers parameters
+    parser.add_argument('--min-layers', type=int, default=2, 
+                      help='Minimum number of layers in the architecture')
+    parser.add_argument('--max-layers', type=int, default=10,
+                      help='Maximum number of layers in the architecture')
 
     # Export options
     parser.add_argument('--export-model', action='store_true',
                         help='Export the best model after search')
+    parser.add_argument('--export-json', type=str, default=None,
+                        help='Export the best architecture to a JSON file')
     parser.add_argument(
         '--export-format',
         type=str,
@@ -389,23 +426,75 @@ def run_search(args, components, experiment_name, results_dir, models_dir):
     """Run the neural architecture search process."""
     logger.info(f"Starting search experiment: {experiment_name}")
 
-    # Create evolutionary search with user-selected progressive search setting
-    search = EvolutionarySearch(
-        architecture_space=components['architecture_space'],
-        evaluator=components['evaluator'],
-        dataset_name=args.dataset,
-        population_size=args.population_size,
-        mutation_rate=args.mutation_rate,
-        generations=args.generations,
-        elite_size=args.elite_size,
-        tournament_size=3,
-        metric='val_acc',
-        save_history=True,
-        checkpoint_frequency=args.checkpoint_frequency,  # Use the command-line argument
-        output_dir=args.output_dir,
-        results_dir=results_dir,
-        enable_progressive=args.enable_progressive  # User-controlled progressive search
-    )
+    # Select the appropriate search method based on user input
+    if args.search_method == 'evolutionary':
+        # Create evolutionary search with user-selected progressive search setting
+        search = EvolutionarySearch(
+            architecture_space=components['architecture_space'],
+            evaluator=components['evaluator'],
+            dataset_name=args.dataset,
+            population_size=args.population_size,
+            mutation_rate=args.mutation_rate,
+            generations=args.generations,
+            elite_size=args.elite_size,
+            tournament_size=3,
+            metric='val_acc',
+            save_history=True,
+            checkpoint_frequency=args.checkpoint_frequency,
+            output_dir=args.output_dir,
+            results_dir=results_dir,
+            enable_progressive=args.enable_progressive
+        )
+    elif args.search_method == 'pnas':
+        # Create PNAS search
+        search = PNASSearch(
+            architecture_space=components['architecture_space'],
+            evaluator=components['evaluator'],
+            dataset_name=args.dataset,
+            beam_size=args.beam_size,
+            num_expansions=args.num_expansions,
+            max_complexity=args.max_complexity,
+            metric='val_acc',
+            checkpoint_frequency=args.checkpoint_frequency,
+            output_dir=args.output_dir,
+            results_dir=results_dir,
+            use_shared_weights=args.use_shared_weights,
+            shared_weights_importance=args.shared_weights_importance,
+            dynamic_importance_weight=args.dynamic_importance_weight
+        )
+    elif args.search_method == 'enas':
+        # Create ENAS search
+        search = ENASSearch(
+            architecture_space=components['architecture_space'],
+            evaluator=components['evaluator'],
+            dataset_name=args.dataset,
+            controller_sample_count=args.controller_sample_count,
+            controller_entropy_weight=args.controller_entropy_weight,
+            weight_sharing_max_models=args.weight_sharing_max_models,
+            metric='val_acc',
+            checkpoint_frequency=args.checkpoint_frequency,
+            output_dir=args.output_dir,
+            results_dir=results_dir
+        )
+    else:
+        # Default to evolutionary search as fallback
+        logger.warning(f"Unknown search method: {args.search_method}. Using evolutionary search.")
+        search = EvolutionarySearch(
+            architecture_space=components['architecture_space'],
+            evaluator=components['evaluator'],
+            dataset_name=args.dataset,
+            population_size=args.population_size,
+            mutation_rate=args.mutation_rate,
+            generations=args.generations,
+            elite_size=args.elite_size,
+            tournament_size=3,
+            metric='val_acc',
+            save_history=True,
+            checkpoint_frequency=args.checkpoint_frequency,
+            output_dir=args.output_dir,
+            results_dir=results_dir,
+            enable_progressive=args.enable_progressive
+        )
 
     # Force specific network type if specified
     if args.network_type == 'all':
@@ -424,72 +513,99 @@ def run_search(args, components, experiment_name, results_dir, models_dir):
 
         # Replace the method
         search.architecture_space.sample_random_architecture = sample_with_fixed_type
+        
+    # Apply min-layers and max-layers constraints if specified
+    if (args.min_layers is not None or args.max_layers is not None) and hasattr(search.architecture_space, 'set_layer_constraints'):
+        logger.info(f"Setting layer constraints: min_layers={args.min_layers}, max_layers={args.max_layers}")
+        search.architecture_space.set_layer_constraints(args.min_layers, args.max_layers)
 
     # Check if we should resume from checkpoint
     start_generation = 0
     if args.resume_from:
         try:
-            logger.info(
-                f"Attempting to resume from checkpoint: {args.resume_from}")
-            # Call the evolve method with the resume_from parameter
-            best_architecture, best_fitness, history = search.evolve(
-                fast_mode_generations=args.fast_mode_gens,
-                resume_from=args.resume_from
-            )
-            # Save results and return early since evolve handles the full
-            # search process
+            logger.info(f"Attempting to resume from checkpoint: {args.resume_from}")
+            
+            # Different search methods have different methods for running the search
+            if args.search_method == 'evolutionary':
+                # Call the evolve method with the resume_from parameter
+                best_architecture, best_fitness, history = search.evolve(
+                    fast_mode_generations=args.fast_mode_gens,
+                    resume_from=args.resume_from
+                )
+            elif args.search_method == 'pnas' or args.search_method == 'enas':
+                # Call the search method with the resume_from parameter
+                best_architecture, best_fitness, history = search.search(
+                    resume_from=args.resume_from
+                )
+            else:
+                # Fall back to evolutionary search
+                best_architecture, best_fitness, history = search.evolve(
+                    fast_mode_generations=args.fast_mode_gens,
+                    resume_from=args.resume_from
+                )
+                
+            # Save results and return early since the search method handles the full search process
             save_results(
                 experiment_name,
                 history,
                 best_architecture,
                 best_fitness,
                 results_dir,
-                models_dir)
-            logger.info(
-                f"Search resumed and completed! Best fitness: {best_fitness:.4f}")
+                models_dir,
+                args=args)
+            logger.info(f"Search resumed and completed! Best fitness: {best_fitness:.4f}")
             return best_architecture, best_fitness, history
         except Exception as e:
             logger.error(f"Failed to resume from checkpoint: {e}")
             logger.info("Starting new search instead")
 
-    # Initialize population
-    logger.info("Initializing population...")
-    search.initialize_population()
+    # Run different search algorithms depending on the method
+    if args.search_method == 'evolutionary':
+        # Initialize population
+        logger.info("Initializing population...")
+        search.initialize_population()
 
-    # Run evolutionary search
-    for generation in range(start_generation, args.generations):
-        logger.info(f"Generation {generation + 1}/{args.generations}")
+        # Run evolutionary search
+        for generation in range(start_generation, args.generations):
+            logger.info(f"Generation {generation + 1}/{args.generations}")
 
-        # Use fast mode for early generations
-        use_fast_mode = generation < args.fast_mode_gens
+            # Use fast mode for early generations
+            use_fast_mode = generation < args.fast_mode_gens
 
-        # Evaluate population
-        if components['parallel_evaluator'] and not use_fast_mode:
-            # Use parallel evaluation for regular evaluation
-            logger.info("Using parallel evaluation")
-            fitness_scores = components['parallel_evaluator'].evaluate_architectures(
-                search.population, args.dataset, fast_mode=use_fast_mode)
-            search.fitness_scores = fitness_scores
-        else:
-            # Use standard evaluation
-            logger.info(f"Evaluating population (fast_mode={use_fast_mode})")
-            search.evaluate_population(fast_mode=use_fast_mode)
+            # Evaluate population
+            if components['parallel_evaluator'] and not use_fast_mode:
+                # Use parallel evaluation for regular evaluation
+                logger.info("Using parallel evaluation")
+                fitness_scores = components['parallel_evaluator'].evaluate_architectures(
+                    search.population, args.dataset, fast_mode=use_fast_mode)
+                search.fitness_scores = fitness_scores
+            else:
+                # Use standard evaluation
+                logger.info(f"Evaluating population (fast_mode={use_fast_mode})")
+                search.evaluate_population(fast_mode=use_fast_mode)
 
-        # Log generation statistics
-        best_idx = search.fitness_scores.index(max(search.fitness_scores))
-        best_fitness = search.fitness_scores[best_idx]
-        avg_fitness = sum(search.fitness_scores) / len(search.fitness_scores)
-        logger.info(
-            f"Generation stats: Avg fitness: {avg_fitness:.4f}, Best fitness: {best_fitness:.4f}")
+            # Log generation statistics
+            best_idx = search.fitness_scores.index(max(search.fitness_scores))
+            best_fitness = search.fitness_scores[best_idx]
+            avg_fitness = sum(search.fitness_scores) / len(search.fitness_scores)
+            logger.info(
+                f"Generation stats: Avg fitness: {avg_fitness:.4f}, Best fitness: {best_fitness:.4f}")
 
-        # Create next generation (except for last iteration)
-        if generation < args.generations - 1:
-            search.population = search.create_next_generation()
+            # Create next generation (except for last iteration)
+            if generation < args.generations - 1:
+                search.population = search.create_next_generation()
 
-    # Get best architecture and save results
-    best_architecture = search.best_architecture
-    best_fitness = search.best_fitness
-    history = search.history
+        # Get best architecture and save results
+        best_architecture = search.best_architecture
+        best_fitness = search.best_fitness
+        history = search.history
+        
+    elif args.search_method == 'pnas' or args.search_method == 'enas':
+        # Run PNAS or ENAS search
+        logger.info(f"Running {args.search_method.upper()} search...")
+        best_architecture, best_fitness, history = search.search(
+            progress_callback=None  # Can implement a progress callback function if needed
+        )
 
     # Save results
     save_results(
@@ -498,7 +614,16 @@ def run_search(args, components, experiment_name, results_dir, models_dir):
         best_architecture,
         best_fitness,
         results_dir,
-        models_dir)
+        models_dir,
+        args=args)
+
+    # Export architecture to JSON if requested
+    if args.export_json:
+        logger.info(f"Exporting best architecture to JSON: {args.export_json}")
+        os.makedirs(os.path.dirname(os.path.abspath(args.export_json)), exist_ok=True)
+        with open(args.export_json, 'w') as f:
+            json.dump(best_architecture, f, indent=2)
+        logger.info(f"Architecture exported successfully to: {args.export_json}")
 
     # Export model if requested
     if args.export_model:
@@ -508,11 +633,20 @@ def run_search(args, components, experiment_name, results_dir, models_dir):
             results = components['evaluator'].evaluate(
                 best_architecture, args.dataset, fast_mode=False)
         else:
+            # Add required fields for export
             results = {
                 'test_acc': best_fitness,
                 'architecture': best_architecture,
                 'dataset': args.dataset
             }
+            
+            # Add additional fields based on search method
+            if args.search_method == 'pnas' and args.use_shared_weights:
+                results['search_method'] = 'pnas+enas_hybrid'
+                results['shared_weights_importance'] = args.shared_weights_importance
+                results['dynamic_importance_weight'] = args.dynamic_importance_weight
+            else:
+                results['search_method'] = args.search_method
 
         # Export the model
         logger.info(f"Exporting best model to {args.export_format} format")
@@ -576,7 +710,8 @@ def save_results(
         best_architecture,
         best_fitness,
         results_dir,
-        models_dir):
+        models_dir,
+        args=None):
     """Save search results to disk."""
     # Save history as pickle
     history_path = os.path.join(results_dir, f"{experiment_name}_history.pkl")
@@ -595,8 +730,28 @@ def save_results(
         'architecture_depth': best_architecture['num_layers'],
         'architecture_path': arch_path,
         'history_path': history_path,
-        'time_completed': time.strftime("%Y-%m-%d %H:%M:%S")
+        'time_completed': time.strftime("%Y-%m-%d %H:%M:%S"),
+        'search_method': args.search_method if args else 'unknown'
     }
+    
+    # Add method-specific details if available
+    if args:
+        if args.search_method == 'pnas':
+            summary['beam_size'] = args.beam_size
+            summary['max_complexity'] = args.max_complexity
+            
+            if args.use_shared_weights:
+                summary['hybrid_mode'] = True
+                summary['shared_weights_importance'] = args.shared_weights_importance
+                summary['dynamic_importance_weight'] = args.dynamic_importance_weight
+        
+        elif args.search_method == 'enas':
+            summary['controller_sample_count'] = args.controller_sample_count
+        
+        elif args.search_method == 'evolutionary':
+            summary['population_size'] = args.population_size
+            summary['generations'] = args.generations
+            summary['mutation_rate'] = args.mutation_rate
 
     summary_path = os.path.join(results_dir, f"{experiment_name}_summary.json")
     with open(summary_path, 'w') as f:
@@ -634,16 +789,30 @@ def main():
 
             # Print summary of results
             print("\nSearch Results Summary:")
+            print(f"  Search method: {args.search_method}")
             print(f"  Dataset: {args.dataset}")
             print(f"  Best validation accuracy: {best_fitness:.4f}")
-            print(
-                f"  Architecture depth: {best_architecture['num_layers']} layers")
-            print(
-                f"  Network type: {best_architecture.get('network_type', 'cnn')}")
+            print(f"  Architecture depth: {best_architecture['num_layers']} layers")
+            print(f"  Network type: {best_architecture.get('network_type', 'cnn')}")
             print(f"  Results saved as: {experiment_name}")
+            
+            # Print additional details based on search method
+            if args.search_method == 'pnas' and args.use_shared_weights:
+                print(f"  PNAS+ENAS hybrid mode enabled")
+                print(f"  Shared weights importance: {args.shared_weights_importance}")
+                if args.dynamic_importance_weight:
+                    print(f"  Dynamic importance weight adjustment enabled")
+            elif args.search_method == 'enas':
+                print(f"  Controller sample count: {args.controller_sample_count}")
+            elif args.search_method == 'evolutionary':
+                print(f"  Population size: {args.population_size}")
+                print(f"  Generations: {args.generations}")
 
             if args.export_model:
                 print(f"  Model exported to: {args.export_dir}")
+                
+            if args.export_json:
+                print(f"  Architecture exported to: {args.export_json}")
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
