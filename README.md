@@ -609,8 +609,6 @@ Parameter sharing based on the ENAS paper by Pham et al. (2018) significantly sp
 
 Parameter sharing typically provides a 2-5x speedup for the search process, while maintaining comparable accuracy in discovering effective architectures.
 
-**Note on Implementation Difference:** Unlike the original ENAS paper which uses an RNN controller to generate architectures, S-NAS implements the parameter sharing concept from ENAS but uses evolutionary search instead of an RNN controller. This difference simplifies the implementation while still leveraging the core efficiency benefit of weight sharing between candidate architectures.
-
 #### Progressive Search
 
 Progressive neural architecture search based on the paper by Liu et al. (2018) makes the search more efficient by gradually increasing architecture complexity:
@@ -624,10 +622,6 @@ This leads to:
 - More efficient exploration of the architecture space
 - Better architectures found with the same computational budget
 - Reduced chance of getting stuck in local optima
-
-**Note on Implementation Difference:** The S-NAS implementation differs significantly from the original PNAS paper. The original PNAS uses a surrogate model (an LSTM predictor) to estimate architecture performance without full training, along with a sophisticated progressive widening strategy. S-NAS adopts only the concept of gradually increasing architecture complexity through predefined complexity levels during evolutionary search, without the predictive surrogate model. This simplified approach is more practical but doesn't leverage the full performance prediction benefits of the original paper.
-
-**⚠️ COMING SOON:** A more faithful implementation of PNAS including the surrogate predictor model is currently in development and will be available in a future update.
 
 S-NAS combines both these techniques by default, providing state-of-the-art efficiency for neural architecture search.
 
