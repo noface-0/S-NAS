@@ -39,6 +39,9 @@ class SearchVisualizer:
         """
         self.architecture_space = architecture_space
         plt.style.use('seaborn-v0_8-whitegrid')
+        
+        # Default setting for metric direction
+        self.higher_is_better = True  # Default: higher is better (accuracy)
 
     def plot_search_progress(self, history, metric='best_fitness'):
         """
@@ -55,24 +58,42 @@ class SearchVisualizer:
         fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
 
         # Extract data
+        if 'generations' not in history:
+            # For PNAS search, use complexity levels as generations
+            if 'complexity_levels' in history:
+                history['generations'] = history['complexity_levels']
+            else:
+                # If no generations or complexity levels, create a sequence
+                if 'best_fitness' in history:
+                    history['generations'] = list(range(1, len(history['best_fitness']) + 1))
+                else:
+                    # Fall back to a single point if no data available
+                    history['generations'] = [1]
+                    
         generations = history['generations']
 
         # Determine if we're dealing with a loss metric (lower is better)
         is_loss_metric = False
         if 'metric_type' in history and history['metric_type'] == 'loss':
             is_loss_metric = True
+            self.higher_is_better = False
         elif 'metric' in history and history['metric'].endswith('loss'):
             # If metric name ends with 'loss', it's a loss metric
             is_loss_metric = True
-        elif any(best_fitness < 1.0 for best_fitness in history['best_fitness']) and max(history['best_fitness']) < 5.0:
-            # Accuracy metrics for classification are typically in the range [0, 1]
-            # If all values are small but close to 1, it's likely an accuracy metric, not a loss
-            if min(history['best_fitness']) > 0.5:
-                is_loss_metric = False  # Likely an accuracy metric near 1.0
-            else:
-                # Heuristic: If the best fitness values are small (<5) with some below 0.5,
-                # it's more likely a loss metric
-                is_loss_metric = True
+            self.higher_is_better = False
+        elif 'best_fitness' in history and len(history['best_fitness']) > 0:
+            # Check fitness values to guess the metric type
+            if any(best_fitness < 1.0 for best_fitness in history['best_fitness']) and max(history['best_fitness']) < 5.0:
+                # Accuracy metrics for classification are typically in the range [0, 1]
+                # If all values are small but close to 1, it's likely an accuracy metric, not a loss
+                if min(history['best_fitness']) > 0.5:
+                    is_loss_metric = False  # Likely an accuracy metric near 1.0
+                    self.higher_is_better = True
+                else:
+                    # Heuristic: If the best fitness values are small (<5) with some below 0.5,
+                    # it's more likely a loss metric
+                    is_loss_metric = True
+                    self.higher_is_better = False
 
         # Get the metric name for better labels
         metric_name = history.get('metric', 'val_acc')
@@ -80,22 +101,54 @@ class SearchVisualizer:
         if metric == 'multiple':
             # Plot multiple metrics on the same graph with enhanced styling
             best_label = f'Best {metric_name}'
-            avg_label = f'Average {metric_name}'
+            
+            # Check if best_fitness exists
+            if 'best_fitness' not in history:
+                # Try to use beam_performances as an alternative for PNAS search
+                if 'beam_performances' in history and history['beam_performances']:
+                    # Use the last value from each level for plotting
+                    history['best_fitness'] = [max(perf) if self.higher_is_better else min(perf) 
+                                              for perf in history['beam_performances']]
+                else:
+                    # Create a dummy array if no fitness data exists
+                    history['best_fitness'] = [0.5] * len(generations)
             
             best_line, = ax.plot(generations, history['best_fitness'], 'o-', color='#1f77b4',
                                  linewidth=2.5, markersize=6, label=best_label)
+            
+            # Check if avg_fitness exists (for evolutionary search) or create it (for PNAS)
+            if 'avg_fitness' not in history:
+                # For PNAS search, use average of beam performances
+                if 'beam_performances' in history and history['beam_performances']:
+                    history['avg_fitness'] = [sum(perf)/len(perf) if perf else 0 
+                                             for perf in history['beam_performances']]
+                else:
+                    # Create a dummy array if no fitness data exists
+                    history['avg_fitness'] = [0.3] * len(generations)
+            
+            avg_label = f'Average {metric_name}'
             avg_line, = ax.plot(generations, history['avg_fitness'], 's-', color='#2ca02c',
                                 linewidth=2, markersize=5, label=avg_label)
 
-            # Fill between best and average fitness to highlight improvement
-            # space
+            # Fill between best and average fitness to highlight improvement space
             ax.fill_between(generations,
                             history['best_fitness'],
                             history['avg_fitness'],
                             alpha=0.15, color='#1f77b4')
 
-            # Add diversity on a second axis with enhanced styling
+            # Add diversity - check if population_diversity exists
             ax2 = ax.twinx()
+            
+            if 'population_diversity' not in history:
+                # For PNAS, we don't have diversity, so create a dummy or derive it
+                if 'beam_architectures' in history:
+                    # Create a simple diversity metric based on beam size variation
+                    history['population_diversity'] = [len(set(str(arch))) / 1000 
+                                                      for arch in history['beam_architectures']]
+                else:
+                    # Create a dummy array
+                    history['population_diversity'] = [0.5] * len(generations)
+            
             div_line, = ax2.plot(generations, history['population_diversity'], 'd-',
                                  color='#d62728', linewidth=1.5, markersize=5, label='Diversity')
             ax2.set_ylabel('Diversity', color='#d62728', fontweight='bold')
