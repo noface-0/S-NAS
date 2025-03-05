@@ -543,19 +543,43 @@ class PNASSearch:
             surrogate_predictions = self._get_surrogate_predictions(architectures)
             shared_weights_predictions = self._get_shared_weights_predictions(architectures)
             
+            # Make sure both prediction lists have the same length
+            if len(surrogate_predictions) != len(shared_weights_predictions):
+                logger.warning(f"Prediction length mismatch: surrogate={len(surrogate_predictions)}, shared_weights={len(shared_weights_predictions)}")
+                # Use the smaller length to avoid index errors
+                min_length = min(len(surrogate_predictions), len(shared_weights_predictions))
+                surrogate_predictions = surrogate_predictions[:min_length]
+                shared_weights_predictions = shared_weights_predictions[:min_length]
+            
             # Combine predictions using weighted average
             combined_predictions = []
-            for i in range(len(architectures)):
-                # If any prediction is None, use the other prediction
-                if surrogate_predictions[i] is None:
-                    combined_predictions.append(shared_weights_predictions[i])
-                elif shared_weights_predictions[i] is None:
-                    combined_predictions.append(surrogate_predictions[i])
+            for i in range(len(surrogate_predictions)):
+                # Make sure predictions are numeric values, not None or tensors
+                surrogate_pred = surrogate_predictions[i]
+                shared_pred = shared_weights_predictions[i]
+                
+                # Convert to float values if possible
+                if isinstance(surrogate_pred, torch.Tensor):
+                    surrogate_pred = surrogate_pred.item()
+                if isinstance(shared_pred, torch.Tensor):
+                    shared_pred = shared_pred.item()
+                
+                # Handle None values
+                if surrogate_pred is None and shared_pred is None:
+                    # If both are None, use a default value
+                    if self.higher_is_better:
+                        combined_predictions.append(0.0)  # Default low accuracy
+                    else:
+                        combined_predictions.append(1.0)  # Default reasonable loss
+                elif surrogate_pred is None:
+                    combined_predictions.append(shared_pred)
+                elif shared_pred is None:
+                    combined_predictions.append(surrogate_pred)
                 else:
                     # Weighted average of both predictions
                     combined = (
-                        (1 - self.shared_weights_importance) * surrogate_predictions[i] +
-                        self.shared_weights_importance * shared_weights_predictions[i]
+                        (1 - self.shared_weights_importance) * surrogate_pred +
+                        self.shared_weights_importance * shared_pred
                     )
                     combined_predictions.append(combined)
             
@@ -633,21 +657,33 @@ class PNASSearch:
                     continue
                 
                 # Try to estimate from shared weights pool
-                if hasattr(self.evaluator, 'estimate_performance_from_shared_weights'):
-                    similar_performance = self.evaluator.estimate_performance_from_shared_weights(
-                        arch, self.dataset_name, self.metric
-                    )
+                try:
+                    if hasattr(self.evaluator, 'estimate_performance_from_shared_weights'):
+                        similar_performance = self.evaluator.estimate_performance_from_shared_weights(
+                            arch, self.dataset_name, self.metric
+                        )
+                except Exception as inner_e:
+                    logger.error(f"Error estimating from shared weights: {inner_e}")
+                    similar_performance = None
                 
                 if similar_performance is not None:
                     predictions.append(similar_performance)
                 else:
-                    # If no shared weights match, use a None placeholder
-                    # The combined prediction will then fall back to the surrogate model
-                    predictions.append(None)
+                    # If no shared weights match, use a default value instead of None
+                    # This ensures consistent tensor types when combining predictions
+                    if self.higher_is_better:
+                        default_value = 0.0  # Default low accuracy
+                    else:
+                        default_value = 1.0  # Default reasonable loss
+                    predictions.append(default_value)
                 
             except Exception as e:
                 logger.error(f"Error getting shared weights prediction: {e}")
-                predictions.append(None)
+                # Use default instead of None to ensure consistent tensor types
+                if self.higher_is_better:
+                    predictions.append(0.0)  # Default low accuracy
+                else:
+                    predictions.append(1.0)  # Default reasonable loss
         
         return predictions
     

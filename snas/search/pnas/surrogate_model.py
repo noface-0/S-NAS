@@ -240,6 +240,21 @@ class SurrogateModel(nn.Module):
                                         torch.zeros((1, padding_needed), device=self.device)], dim=1)
             actual_input_size = len(tensor_encoding[0]) // seq_len
         
+        # Ensure consistent feature size after the first model is trained
+        if hasattr(self, 'is_trained') and self.is_trained and self.input_size != actual_input_size:
+            logger.warning(f"Architecture encoding size mismatch: expected {self.input_size}, got {actual_input_size}")
+            
+            # Pad or truncate to match expected input size
+            if actual_input_size < self.input_size:
+                # Pad with zeros to match expected size
+                padding = torch.zeros((1, seq_len, self.input_size - actual_input_size), device=self.device)
+                reshaped = tensor_encoding.view(1, seq_len, actual_input_size)
+                return torch.cat([reshaped, padding], dim=2)
+            else:
+                # Truncate to expected size
+                reshaped = tensor_encoding.view(1, seq_len, actual_input_size)
+                return reshaped[:, :, :self.input_size]
+        
         # Reshape to [batch_size, seq_len, input_size]
         return tensor_encoding.view(1, seq_len, actual_input_size)
     
