@@ -25,7 +25,7 @@ class SurrogateModel(nn.Module):
     """
     
     def __init__(self, 
-                 input_size: int = 32, 
+                 input_size: int = 8, 
                  hidden_size: int = 64,
                  num_layers: int = 2,
                  dropout: float = 0.1,
@@ -42,6 +42,7 @@ class SurrogateModel(nn.Module):
         """
         super(SurrogateModel, self).__init__()
         
+        # Changed default from 32 to 8 based on the observed encoding size
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -342,10 +343,10 @@ class SurrogateModel(nn.Module):
                 
                 # Ensure all encodings have the same shape
                 for i, enc in enumerate(encoded_architectures):
-                    if enc.shape != sample_shape:
+                    if isinstance(enc, torch.Tensor) and enc.shape != sample_shape:
                         logger.warning(f"Architecture {i} has different shape: {enc.shape} vs {sample_shape}")
                         # Reshape/pad to match the expected dimensions
-                        if enc.shape[1:] != sample_shape[1:]:
+                        if len(enc.shape) >= 3 and enc.shape[1:] != sample_shape[1:]:
                             # Pad the sequence dimension (dim=1) and feature dimension (dim=2) if needed
                             padded_enc = torch.zeros(sample_shape, device=self.device)
                             min_seq_len = min(enc.shape[1], sample_shape[1])
@@ -380,9 +381,21 @@ class SurrogateModel(nn.Module):
                     batch_indices = train_indices[i:i+batch_size]
                     
                     try:
-                        # Create batch
-                        batch_x = torch.cat([encoded_architectures[idx] for idx in batch_indices], dim=0)
-                        batch_y = torch.cat([performance_tensor[idx] for idx in batch_indices], dim=0)
+                        # Create batch - with error handling for non-tensor architectures
+                        valid_batch_indices = []
+                        valid_encoded_archs = []
+                        
+                        for idx in batch_indices:
+                            if idx < len(encoded_architectures) and isinstance(encoded_architectures[idx], torch.Tensor):
+                                valid_batch_indices.append(idx)
+                                valid_encoded_archs.append(encoded_architectures[idx])
+                        
+                        if not valid_encoded_archs:
+                            logger.warning(f"No valid tensors found in batch {i}")
+                            continue
+                            
+                        batch_x = torch.cat(valid_encoded_archs, dim=0)
+                        batch_y = torch.cat([performance_tensor[idx] for idx in valid_batch_indices], dim=0)
                         
                         # Ensure both tensors are on the same device
                         batch_x = batch_x.to(self.device)
@@ -394,8 +407,12 @@ class SurrogateModel(nn.Module):
                         # Ensure output and target have same shape
                         if outputs.shape != batch_y.shape:
                             logger.warning(f"Shape mismatch: outputs={outputs.shape}, batch_y={batch_y.shape}")
-                            # Reshape if needed
-                            if outputs.dim() == 2 and batch_y.dim() == 2 and outputs.size(0) == batch_y.size(0):
+                            # If outputs is [batch_size, 1] and batch_y is [batch_size]
+                            if outputs.dim() == 2 and batch_y.dim() == 1 and outputs.size(0) == batch_y.size(0):
+                                # Squeeze outputs to match batch_y
+                                outputs = outputs.squeeze(1)
+                            # If outputs is [batch_size, 1] and batch_y is [batch_size, 1]
+                            elif outputs.dim() == 2 and batch_y.dim() == 2 and outputs.size(0) == batch_y.size(0):
                                 # Only reshape if it's just a matter of different feature dimensions
                                 outputs = outputs.view(batch_y.shape)
                         
@@ -421,8 +438,22 @@ class SurrogateModel(nn.Module):
                     self.eval()
                     try:
                         with torch.no_grad():
-                            val_x = torch.cat([encoded_architectures[idx] for idx in val_indices], dim=0)
-                            val_y = torch.cat([performance_tensor[idx] for idx in val_indices], dim=0)
+                            # Filter valid validation indices
+                            valid_val_indices = []
+                            valid_val_archs = []
+                            
+                            for idx in val_indices:
+                                if idx < len(encoded_architectures) and isinstance(encoded_architectures[idx], torch.Tensor):
+                                    valid_val_indices.append(idx)
+                                    valid_val_archs.append(encoded_architectures[idx])
+                            
+                            if not valid_val_archs:
+                                logger.warning("No valid tensors found for validation")
+                                self.val_losses.append(float('inf'))
+                                continue
+                                
+                            val_x = torch.cat(valid_val_archs, dim=0)
+                            val_y = torch.cat([performance_tensor[idx] for idx in valid_val_indices], dim=0)
                             
                             # Ensure both tensors are on the same device
                             val_x = val_x.to(self.device)
@@ -433,7 +464,12 @@ class SurrogateModel(nn.Module):
                             # Reshape if needed
                             if val_outputs.shape != val_y.shape:
                                 logger.warning(f"Validation shape mismatch: outputs={val_outputs.shape}, val_y={val_y.shape}")
-                                if val_outputs.dim() == 2 and val_y.dim() == 2 and val_outputs.size(0) == val_y.size(0):
+                                # If val_outputs is [batch_size, 1] and val_y is [batch_size]
+                                if val_outputs.dim() == 2 and val_y.dim() == 1 and val_outputs.size(0) == val_y.size(0):
+                                    # Squeeze val_outputs to match val_y
+                                    val_outputs = val_outputs.squeeze(1)
+                                # If val_outputs is [batch_size, 1] and val_y is [batch_size, 1] 
+                                elif val_outputs.dim() == 2 and val_y.dim() == 2 and val_outputs.size(0) == val_y.size(0):
                                     val_outputs = val_outputs.view(val_y.shape)
                                     
                             val_loss = criterion(val_outputs, val_y).item()

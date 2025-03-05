@@ -74,26 +74,34 @@ class SearchVisualizer:
 
         # Determine if we're dealing with a loss metric (lower is better)
         is_loss_metric = False
-        if 'metric_type' in history and history['metric_type'] == 'loss':
-            is_loss_metric = True
-            self.higher_is_better = False
-        elif 'metric' in history and history['metric'].endswith('loss'):
-            # If metric name ends with 'loss', it's a loss metric
-            is_loss_metric = True
-            self.higher_is_better = False
-        elif 'best_fitness' in history and len(history['best_fitness']) > 0:
-            # Check fitness values to guess the metric type
-            if any(best_fitness < 1.0 for best_fitness in history['best_fitness']) and max(history['best_fitness']) < 5.0:
-                # Accuracy metrics for classification are typically in the range [0, 1]
-                # If all values are small but close to 1, it's likely an accuracy metric, not a loss
-                if min(history['best_fitness']) > 0.5:
-                    is_loss_metric = False  # Likely an accuracy metric near 1.0
-                    self.higher_is_better = True
+        # For accuracy metrics like 'val_acc', higher values are better
+        # For loss metrics like 'val_loss', lower values are better
+        
+        # Set default values based on metric name
+        if 'metric' in history:
+            metric_name = history['metric']
+            if metric_name.endswith('acc'):
+                is_loss_metric = False
+                self.higher_is_better = True
+            elif metric_name.endswith('loss'):
+                is_loss_metric = True
+                self.higher_is_better = False
+            else:
+                # Try to infer from metric_type
+                if 'metric_type' in history:
+                    is_loss_metric = history['metric_type'] == 'loss'
+                    self.higher_is_better = not is_loss_metric
                 else:
-                    # Heuristic: If the best fitness values are small (<5) with some below 0.5,
-                    # it's more likely a loss metric
-                    is_loss_metric = True
-                    self.higher_is_better = False
+                    # Default: treating as accuracy (higher is better)
+                    is_loss_metric = False
+                    self.higher_is_better = True
+        elif 'metric_type' in history:
+            is_loss_metric = history['metric_type'] == 'loss'
+            self.higher_is_better = not is_loss_metric
+        else:
+            # Default to accuracy-based metric (higher is better)
+            is_loss_metric = False
+            self.higher_is_better = True
 
         # Get the metric name for better labels
         metric_name = history.get('metric', 'val_acc')

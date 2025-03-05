@@ -34,7 +34,7 @@ class PNASSearch:
     """
     
     def __init__(self, architecture_space, evaluator, dataset_name,
-                 beam_size=10, num_expansions=5, max_complexity=3,
+                 beam_size=10, num_expansions=5, max_complexity=5,  # Increased from 3 to 5
                  surrogate_model=None, predictor_batch_size=100,
                  metric='val_acc', checkpoint_frequency=0,
                  output_dir="output", results_dir="output/results",
@@ -91,7 +91,7 @@ class PNASSearch:
         if surrogate_model is None:
             device = evaluator.device
             self.surrogate_model = SurrogateModel(
-                input_size=32,  # Will be adjusted dynamically in encode_architecture
+                input_size=8,  # Changed from 32 to 8 to match actual encoding dimension
                 hidden_size=64,
                 num_layers=2,
                 dropout=0.1,
@@ -139,7 +139,8 @@ class PNASSearch:
         # Adjust complexity based on level
         if complexity_level == 1:
             # Simplest architectures - fewer layers, simpler components
-            architecture['num_layers'] = min(3, architecture['num_layers'])
+            # Increased from 3 to 4 to allow for deeper networks even at level 1
+            architecture['num_layers'] = min(4, architecture['num_layers'])
             
             # Simplify network type - avoid complex types at level 1
             simple_types = ['cnn', 'mlp']
@@ -177,7 +178,8 @@ class PNASSearch:
                 
         elif complexity_level == 2:
             # Medium complexity - moderate layers, some advanced features
-            architecture['num_layers'] = min(5, architecture['num_layers'])
+            # Increased from 5 to 7 to encourage deeper architectures
+            architecture['num_layers'] = min(7, architecture['num_layers'])
             
             # Allow more network types at level 2
             medium_types = ['cnn', 'mlp', 'enhanced_mlp', 'resnet', 'mobilenet']
@@ -186,6 +188,21 @@ class PNASSearch:
             
             # Some skip connections and batch norm allowed
             architecture['use_batch_norm'] = random.choice([True, False])
+            
+        elif complexity_level >= 3:
+            # High complexity levels - allow deeper networks
+            # The higher the complexity level, the deeper the network can be
+            max_layers = 10 + (complexity_level - 3) * 2  # 10 at level 3, 12 at level 4, etc.
+            
+            # Make sure we don't go below the current number of layers
+            if 'num_layers' in architecture:
+                architecture['num_layers'] = max(architecture['num_layers'], 
+                                               min(max_layers, random.randint(7, max_layers)))
+            else:
+                architecture['num_layers'] = random.randint(7, max_layers)
+                
+            # Allow all network types at high complexity
+            # Keep the existing type to maintain stability, but allow deeper networks
         
         # Handle special parameter types
         if 'use_skip_connections' in architecture and not isinstance(architecture['use_skip_connections'], list):
@@ -206,27 +223,47 @@ class PNASSearch:
         expanded = []
         network_type = architecture.get('network_type', 'cnn')
         
-        # 1. Increase the number of layers
+        # 1. Increase the number of layers - prioritize this operation by adding multiple layer variations
         if architecture['num_layers'] < 20:  # Limit max layers
-            arch_more_layers = architecture.copy()
-            arch_more_layers['num_layers'] = architecture['num_layers'] + 1
-            
-            # Add layer-specific parameters
-            if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
-                arch_more_layers['filters'] = architecture['filters'] + [architecture['filters'][-1]]
-                arch_more_layers['kernel_sizes'] = architecture['kernel_sizes'] + [architecture['kernel_sizes'][-1]]
-                arch_more_layers['activations'] = architecture['activations'] + [architecture['activations'][-1]]
-                if 'use_skip_connections' in architecture:
-                    if isinstance(architecture['use_skip_connections'], list):
-                        arch_more_layers['use_skip_connections'] = architecture['use_skip_connections'] + [architecture['use_skip_connections'][-1]]
-                    else:
-                        arch_more_layers['use_skip_connections'] = [architecture['use_skip_connections']] * (architecture['num_layers'] + 1)
-            
-            elif network_type in ['mlp', 'enhanced_mlp']:
-                arch_more_layers['hidden_units'] = architecture['hidden_units'] + [architecture['hidden_units'][-1]]
-                arch_more_layers['activations'] = architecture['activations'] + [architecture['activations'][-1]]
-            
-            expanded.append(arch_more_layers)
+            # Create multiple variations with increased layers (up to 3 additional layers)
+            for i in range(1, min(4, 21 - architecture['num_layers'])):
+                arch_more_layers = architecture.copy()
+                arch_more_layers['num_layers'] = architecture['num_layers'] + i
+                
+                # Add layer-specific parameters
+                if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
+                    # Add i new layers
+                    new_filters = architecture['filters']
+                    new_kernels = architecture['kernel_sizes']
+                    new_activations = architecture['activations']
+                    
+                    for _ in range(i):
+                        new_filters.append(architecture['filters'][-1])
+                        new_kernels.append(architecture['kernel_sizes'][-1])
+                        new_activations.append(architecture['activations'][-1])
+                    
+                    arch_more_layers['filters'] = new_filters
+                    arch_more_layers['kernel_sizes'] = new_kernels
+                    arch_more_layers['activations'] = new_activations
+                    
+                    if 'use_skip_connections' in architecture:
+                        if isinstance(architecture['use_skip_connections'], list):
+                            arch_more_layers['use_skip_connections'] = architecture['use_skip_connections'] + [architecture['use_skip_connections'][-1]] * i
+                        else:
+                            arch_more_layers['use_skip_connections'] = [architecture['use_skip_connections']] * (architecture['num_layers'] + i)
+                
+                elif network_type in ['mlp', 'enhanced_mlp']:
+                    new_hidden_units = architecture['hidden_units']
+                    new_activations = architecture['activations']
+                    
+                    for _ in range(i):
+                        new_hidden_units.append(architecture['hidden_units'][-1])
+                        new_activations.append(architecture['activations'][-1])
+                        
+                    arch_more_layers['hidden_units'] = new_hidden_units
+                    arch_more_layers['activations'] = new_activations
+                
+                expanded.append(arch_more_layers)
         
         # 2. Modify filters/hidden units (increase/decrease)
         if network_type in ['cnn', 'resnet', 'mobilenet', 'densenet', 'shufflenetv2', 'efficientnet']:
@@ -595,12 +632,14 @@ class PNASSearch:
                 elif shared_pred is None:
                     combined_predictions.append(surrogate_pred)
                 else:
-                    # Weighted average of both predictions
-                    combined = (
-                        (1 - self.shared_weights_importance) * surrogate_pred +
-                        self.shared_weights_importance * shared_pred
-                    )
-                    combined_predictions.append(combined)
+                    # Weighted average of both predictions - ensure all values are Python floats
+                    weight1 = float(1 - self.shared_weights_importance)
+                    weight2 = float(self.shared_weights_importance)
+                    pred1 = float(surrogate_pred)
+                    pred2 = float(shared_pred)
+                    
+                    combined = weight1 * pred1 + weight2 * pred2
+                    combined_predictions.append(float(combined))
             
             return combined_predictions
         else:
