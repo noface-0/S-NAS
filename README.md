@@ -578,6 +578,10 @@ S-NAS incorporates several performance optimizations by default:
 
 - **Parameter Sharing (ENAS)**: Weight sharing between models for much faster search (Pham et al., 2018)
 - **Progressive Search**: Gradual complexity increase for more efficient exploration (Liu et al., 2018)
+- **PNAS+ENAS Hybrid**: Combines surrogate model predictions with shared weights using a configurable importance weight
+- **Dynamic Weight Adjustment**: Automatically tunes the balance between surrogate model and shared weights
+- **Performance Tracking**: Detailed timing and resource usage statistics including precise GPU time measurement
+- **Surrogate Accuracy Analysis**: Evaluates and visualizes surrogate model prediction quality
 - **Fast Mode**: Early generations use a reduced training protocol for faster exploration
 - **Gradient Clipping**: Automatic gradient clipping prevents numerical instability issues
 

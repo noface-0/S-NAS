@@ -235,6 +235,13 @@ class Evaluator:
         # Record start time
         start_time = time.time()
         
+        # Record start GPU time if CUDA is available
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            gpu_start_time = torch.cuda.Event(enable_timing=True)
+            gpu_end_time = torch.cuda.Event(enable_timing=True)
+            gpu_start_time.record()
+        
         # Training loop
         for epoch in range(max_epochs):
             # Train for one epoch
@@ -296,6 +303,15 @@ class Evaluator:
         # Calculate training time
         training_time = time.time() - start_time
         
+        # Calculate GPU time if CUDA is available
+        gpu_time_ms = 0
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            gpu_end_time.record()
+            torch.cuda.synchronize()
+            gpu_time_ms = gpu_start_time.elapsed_time(gpu_end_time)
+            logger.info(f"GPU training time: {gpu_time_ms/1000:.3f} seconds")
+        
         # Record model state in shared parameter pool if using weight sharing
         if self.enable_weight_sharing:
             self._update_shared_parameter_pool(model, complete_architecture, best_val_acc, best_val_loss)
@@ -314,6 +330,7 @@ class Evaluator:
             'test_loss': test_loss,
             'epochs_trained': len(train_losses),
             'training_time': training_time,
+            'gpu_time_ms': gpu_time_ms,
             'model_size': self._calculate_model_size(model),
             'flops_estimate': self._estimate_flops(model, dataset_config['input_shape']),
             'monitor_metric': self.monitor,  # Include which metric was monitored

@@ -38,6 +38,11 @@ class SearchVisualizer:
             architecture_space: The architecture space being explored
         """
         self.architecture_space = architecture_space
+        
+        # Set default style
+        sns.set_style('whitegrid')
+        plt.rcParams['figure.figsize'] = (10, 6)
+        plt.rcParams['font.size'] = 12
         plt.style.use('seaborn-v0_8-whitegrid')
         
         # Default setting for metric direction
@@ -1801,6 +1806,180 @@ class SearchVisualizer:
 
         return fig
 
+    def plot_surrogate_accuracy(self, history, fig_size=(12, 10), save_path=None):
+        """
+        Plot surrogate model accuracy metrics over time.
+
+        Args:
+            history: Search history from the search algorithm
+            fig_size: Size of the figure
+            save_path: Path to save the figure (or None to display)
+
+        Returns:
+            matplotlib figure
+        """
+        if 'surrogate_accuracy' not in history or not history['surrogate_accuracy']:
+            print("No surrogate accuracy data available in history")
+            return None
+            
+        # Extract accuracy metrics
+        pearson_values = [metrics.get('pearson', 0) for metrics in history['surrogate_accuracy']]
+        spearman_values = [metrics.get('spearman', 0) for metrics in history['surrogate_accuracy']]
+        mae_values = [metrics.get('mae', 0) for metrics in history['surrogate_accuracy']]
+        sample_sizes = [metrics.get('sample_size', 0) for metrics in history['surrogate_accuracy']]
+        
+        # Create figure
+        fig, axes = plt.subplots(2, 1, figsize=fig_size)
+        
+        # Plot correlation metrics
+        x = list(range(1, len(pearson_values) + 1))
+        axes[0].plot(x, pearson_values, 'o-', label='Pearson Correlation', color='#2077B4')
+        axes[0].plot(x, spearman_values, 's-', label='Spearman Correlation', color='#D62728')
+        axes[0].axhline(y=0, color='black', linestyle='--', alpha=0.3)
+        axes[0].set_xlabel('Evaluation Points')
+        axes[0].set_ylabel('Correlation Coefficient')
+        axes[0].set_title('Surrogate Model Prediction Accuracy')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        # Plot MAE and sample size
+        ax2 = axes[0].twinx()
+        ax2.plot(x, mae_values, 'd-', label='Mean Absolute Error', color='#FF7F0E')
+        ax2.set_ylabel('Mean Absolute Error')
+        ax2.legend(loc='lower right')
+        
+        # Plot the most recent prediction comparison
+        if 'surrogate_predictions_history' in history and 'actual_performances_history' in history:
+            if history['surrogate_predictions_history'] and history['actual_performances_history']:
+                surrogate_preds = history['surrogate_predictions_history'][-1]
+                actual_perfs = history['actual_performances_history'][-1]
+                
+                # Ensure equal length
+                min_len = min(len(surrogate_preds), len(actual_perfs))
+                surrogate_preds = surrogate_preds[:min_len]
+                actual_perfs = actual_perfs[:min_len]
+                
+                # Sort by actual performance for better visualization
+                sorted_indices = sorted(range(len(actual_perfs)), key=lambda i: actual_perfs[i])
+                surrogate_sorted = [surrogate_preds[i] for i in sorted_indices]
+                actual_sorted = [actual_perfs[i] for i in sorted_indices]
+                
+                # Plot
+                axes[1].plot(actual_sorted, label='Actual Performance', marker='o', linestyle='-', color='#2077B4')
+                axes[1].plot(surrogate_sorted, label='Surrogate Prediction', marker='x', linestyle='--', color='#FF7F0E')
+                axes[1].set_xlabel('Architecture Index (sorted by actual performance)')
+                axes[1].set_ylabel('Performance Value')
+                axes[1].set_title('Comparison of Actual Performance vs. Surrogate Prediction')
+                axes[1].legend()
+                axes[1].grid(True, alpha=0.3)
+                
+                # Add correlation annotation
+                import numpy as np
+                from scipy.stats import pearsonr
+                corr, _ = pearsonr(np.array(surrogate_preds), np.array(actual_perfs))
+                axes[1].annotate(f'Correlation: {corr:.4f}', xy=(0.05, 0.95), xycoords='axes fraction',
+                              bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Figure saved to {save_path}")
+        
+        return fig
+        
+    def plot_importance_weight_impact(self, history, fig_size=(14, 10), save_path=None):
+        """
+        Visualize the impact of different importance weight values on hybrid performance.
+        
+        Args:
+            history: Dictionary containing search history with importance weight data
+            fig_size: Size of the figure
+            save_path: Path to save the figure (or None to display)
+            
+        Returns:
+            matplotlib figure or None if data not available
+        """
+        if ('importance_weight_history' not in history or not history['importance_weight_history'] or
+            'surrogate_accuracy' not in history or not history['surrogate_accuracy']):
+            print("No importance weight impact data available in history")
+            return None
+            
+        # Extract data
+        importance_weights = history['importance_weight_history']
+        accuracy_metrics = history['surrogate_accuracy']
+        
+        if len(importance_weights) != len(accuracy_metrics):
+            print("Mismatch between importance weights and accuracy metrics")
+            return None
+            
+        # Prepare data for plotting
+        weights = []
+        pearson_values = []
+        spearman_values = []
+        mae_values = []
+        
+        for w, metrics in zip(importance_weights, accuracy_metrics):
+            weights.append(w)
+            pearson_values.append(metrics.get('pearson', 0))
+            spearman_values.append(metrics.get('spearman', 0))
+            mae_values.append(metrics.get('mae', 0))
+            
+        # Create figure
+        fig, axes = plt.subplots(2, 1, figsize=fig_size)
+        
+        # Sort by weight for line plots
+        sorted_indices = sorted(range(len(weights)), key=lambda i: weights[i])
+        sorted_weights = [weights[i] for i in sorted_indices]
+        sorted_pearson = [pearson_values[i] for i in sorted_indices]
+        sorted_spearman = [spearman_values[i] for i in sorted_indices]
+        sorted_mae = [mae_values[i] for i in sorted_indices]
+        
+        # Plot correlation vs weight
+        axes[0].plot(sorted_weights, sorted_pearson, 'o-', label='Pearson Correlation', color='#2077B4')
+        axes[0].plot(sorted_weights, sorted_spearman, 's-', label='Spearman Correlation', color='#D62728')
+        axes[0].set_xlabel('Shared Weights Importance (α)')
+        axes[0].set_ylabel('Correlation Coefficient')
+        axes[0].set_title('Impact of Importance Weight on Prediction Accuracy')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        # Plot MAE vs weight
+        axes[1].plot(sorted_weights, sorted_mae, 'd-', label='Mean Absolute Error', color='#FF7F0E')
+        axes[1].set_xlabel('Shared Weights Importance (α)')
+        axes[1].set_ylabel('Mean Absolute Error')
+        axes[1].set_title('Impact of Importance Weight on Prediction Error')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+        
+        # Add annotations for optimal values
+        best_pearson_idx = sorted_pearson.index(max(sorted_pearson))
+        best_spearman_idx = sorted_spearman.index(max(sorted_spearman))
+        best_mae_idx = sorted_mae.index(min(sorted_mae))
+        
+        axes[0].annotate(f'Best Pearson: α={sorted_weights[best_pearson_idx]:.2f}',
+                      xy=(sorted_weights[best_pearson_idx], sorted_pearson[best_pearson_idx]),
+                      xytext=(5, 10), textcoords='offset points',
+                      bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+                      
+        axes[0].annotate(f'Best Spearman: α={sorted_weights[best_spearman_idx]:.2f}',
+                      xy=(sorted_weights[best_spearman_idx], sorted_spearman[best_spearman_idx]),
+                      xytext=(5, -20), textcoords='offset points',
+                      bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+                      
+        axes[1].annotate(f'Best MAE: α={sorted_weights[best_mae_idx]:.2f}',
+                      xy=(sorted_weights[best_mae_idx], sorted_mae[best_mae_idx]),
+                      xytext=(5, 10), textcoords='offset points',
+                      bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Figure saved to {save_path}")
+        
+        return fig
+    
     def fig_to_base64(self, fig):
         """
         Convert a matplotlib figure to base64 for embedding in HTML.

@@ -69,6 +69,8 @@ def parse_args():
                         help='Enable PNAS+ENAS hybrid mode with shared weights')
     parser.add_argument('--shared-weights-importance', type=float, default=0.5,
                         help='Balance between surrogate model and shared weights (0.0-1.0)')
+    parser.add_argument('--dynamic-importance-weight', action='store_true',
+                        help='Dynamically adjust importance weight based on surrogate accuracy')
     
     # Training parameters
     parser.add_argument('--max-epochs', type=int, default=10,
@@ -167,7 +169,8 @@ def main():
         output_dir=args.output_dir,
         results_dir=results_dir,
         use_shared_weights=args.use_shared_weights,
-        shared_weights_importance=args.shared_weights_importance
+        shared_weights_importance=args.shared_weights_importance,
+        dynamic_importance_weight=args.dynamic_importance_weight
     )
     
     # Run PNAS search

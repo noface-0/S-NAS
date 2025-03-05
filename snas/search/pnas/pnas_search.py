@@ -42,7 +42,8 @@ class PNASSearch:
                  output_dir="output", results_dir="output/results",
                  use_shared_weights=False, shared_weights_importance=0.5,
                  use_rnn_controller=False, controller_samples_per_step=10,
-                 controller_entropy_weight=0.0001, controller_learning_rate=0.00035):
+                 controller_entropy_weight=0.0001, controller_learning_rate=0.00035,
+                 track_surrogate_accuracy=True, dynamic_importance_weight=False):
         """
         Initialize the PNAS search.
         
@@ -81,6 +82,16 @@ class PNASSearch:
         self.controller_samples_per_step = controller_samples_per_step
         self.controller_entropy_weight = controller_entropy_weight
         self.controller_learning_rate = controller_learning_rate
+        
+        # Surrogate accuracy tracking
+        self.track_surrogate_accuracy = track_surrogate_accuracy
+        self.surrogate_predictions = []
+        self.actual_performances = []
+        
+        # Dynamic importance weight
+        self.dynamic_importance_weight = dynamic_importance_weight
+        self.initial_importance_weight = shared_weights_importance
+        self.importance_weight_history = []
         
         # Set up state manager for checkpointing
         self.state_manager = SearchStateManager(output_dir, results_dir)
@@ -147,6 +158,11 @@ class PNASSearch:
             'evaluation_times': [],
             'best_architecture': [],
             'best_fitness': [],
+            'surrogate_accuracy': [],
+            'surrogate_predictions_history': [],
+            'actual_performances_history': [],
+            'importance_weight_history': [],
+            'importance_weight_adjustments': [],
             'metric': metric,
             'metric_type': 'loss' if metric.endswith('loss') else 'accuracy'
         }
@@ -663,6 +679,21 @@ class PNASSearch:
                     )
                     # Cache the result
                     self.evaluated_architectures[arch_str] = evaluation
+                    
+                    # Track GPU time for performance analysis
+                    if 'gpu_time_ms' in evaluation:
+                        if not hasattr(self, 'gpu_time_stats'):
+                            self.gpu_time_stats = {
+                                'total_gpu_time_ms': 0,
+                                'architecture_count': 0,
+                                'avg_gpu_time_ms': 0
+                            }
+                        self.gpu_time_stats['total_gpu_time_ms'] += evaluation['gpu_time_ms']
+                        self.gpu_time_stats['architecture_count'] += 1
+                        self.gpu_time_stats['avg_gpu_time_ms'] = (
+                            self.gpu_time_stats['total_gpu_time_ms'] / 
+                            self.gpu_time_stats['architecture_count']
+                        )
                 except EvaluationError as e:
                     logger.error(f"Architecture evaluation error: {e}")
                     # Assign a very poor fitness
@@ -811,13 +842,39 @@ class PNASSearch:
         Returns:
             list: Predicted performance values
         """
+        # Start timing prediction process
+        start_time = time.time()
+        
         # Check if we should use the hybrid PNAS+ENAS approach
         if self.use_shared_weights and hasattr(self.evaluator, 'weight_sharing_pool') and self.evaluator.weight_sharing_pool:
-            # Get predictions from both surrogate model and shared weights
-            surrogate_predictions = self._get_surrogate_predictions(architectures)
-            shared_weights_predictions = self._get_shared_weights_predictions(architectures)
+            # Log hybrid prediction mode
+            logger.info(f"Using hybrid prediction mode with importance weight: {self.shared_weights_importance:.2f}")
             
+            # Get predictions from both surrogate model and shared weights
+            surrogate_start = time.time()
+            surrogate_predictions = self._get_surrogate_predictions(architectures)
+            surrogate_time = time.time() - surrogate_start
+            
+            shared_start = time.time()
+            shared_weights_predictions = self._get_shared_weights_predictions(architectures)
+            shared_time = time.time() - shared_start
+            
+            # Log prediction times
+            logger.info(f"Prediction times: Surrogate: {surrogate_time:.3f}s, Shared weights: {shared_time:.3f}s")
             logger.info(f"Surrogate predictions size: {len(surrogate_predictions)}, Shared weights predictions size: {len(shared_weights_predictions)}")
+            
+            # Track prediction statistics
+            if not hasattr(self, 'prediction_stats'):
+                self.prediction_stats = {
+                    'surrogate_time': [],
+                    'shared_weights_time': [],
+                    'hybrid_time': [],
+                    'prediction_count': 0
+                }
+            
+            self.prediction_stats['surrogate_time'].append(surrogate_time)
+            self.prediction_stats['shared_weights_time'].append(shared_time)
+            self.prediction_stats['prediction_count'] += len(architectures)
             
             # Make sure both prediction lists have the same length
             if len(surrogate_predictions) != len(shared_weights_predictions):
@@ -868,8 +925,10 @@ class PNASSearch:
                             combined_predictions.append(1.0)  # Default reasonable loss
                     elif surrogate_pred is None:
                         combined_predictions.append(float(shared_pred))
+                        logger.debug(f"Using only shared prediction: {shared_pred:.4f}")
                     elif shared_pred is None:
                         combined_predictions.append(float(surrogate_pred))
+                        logger.debug(f"Using only surrogate prediction: {surrogate_pred:.4f}")
                     else:
                         # Weighted average of both predictions - ensure all values are Python floats
                         weight1 = float(1 - self.shared_weights_importance)
@@ -879,6 +938,10 @@ class PNASSearch:
                         
                         combined = weight1 * pred1 + weight2 * pred2
                         combined_predictions.append(float(combined))
+                        
+                        # Log detailed prediction if not too many architectures
+                        if len(architectures) <= 10:
+                            logger.debug(f"Architecture {i}: Surrogate: {pred1:.4f}, Shared: {pred2:.4f}, Combined: {combined:.4f}")
                 except Exception as e:
                     # Fallback to a neutral prediction on any error
                     logger.error(f"Error combining predictions: {e}")
@@ -887,10 +950,40 @@ class PNASSearch:
                     else:
                         combined_predictions.append(1.0)  # Neutral value for loss
             
+            # Record total hybrid time
+            hybrid_time = time.time() - start_time
+            self.prediction_stats['hybrid_time'].append(hybrid_time)
+            
+            # Log periodic prediction statistics
+            if len(self.prediction_stats['hybrid_time']) % 10 == 0:
+                avg_surrogate = sum(self.prediction_stats['surrogate_time']) / len(self.prediction_stats['surrogate_time'])
+                avg_shared = sum(self.prediction_stats['shared_weights_time']) / len(self.prediction_stats['shared_weights_time'])
+                avg_hybrid = sum(self.prediction_stats['hybrid_time']) / len(self.prediction_stats['hybrid_time'])
+                
+                logger.info(f"Prediction stats - Total predictions: {self.prediction_stats['prediction_count']}")
+                logger.info(f"Average times - Surrogate: {avg_surrogate:.3f}s, Shared: {avg_shared:.3f}s, Total: {avg_hybrid:.3f}s")
+            
             return combined_predictions
         else:
             # Standard PNAS: just use surrogate model predictions
-            return self._get_surrogate_predictions(architectures)
+            surrogate_predictions = self._get_surrogate_predictions(architectures)
+            
+            # Record timing for standard mode too
+            prediction_time = time.time() - start_time
+            if not hasattr(self, 'prediction_stats'):
+                self.prediction_stats = {
+                    'surrogate_time': [prediction_time],
+                    'prediction_count': len(architectures)
+                }
+            else:
+                self.prediction_stats['surrogate_time'].append(prediction_time)
+                self.prediction_stats['prediction_count'] += len(architectures)
+            
+            if len(self.prediction_stats['surrogate_time']) % 10 == 0:
+                avg_time = sum(self.prediction_stats['surrogate_time']) / len(self.prediction_stats['surrogate_time'])
+                logger.info(f"Standard prediction stats - Predictions: {self.prediction_stats['prediction_count']}, Avg time: {avg_time:.3f}s")
+                
+            return surrogate_predictions
     
     def _get_surrogate_predictions(self, architectures):
         """
@@ -908,9 +1001,20 @@ class PNASSearch:
             # Return random predictions if not trained
             import random
             if self.higher_is_better:
-                return [random.uniform(0.0, 1.0) for _ in range(len(architectures))]
+                predictions = [random.uniform(0.0, 1.0) for _ in range(len(architectures))]
             else:
-                return [random.uniform(0.0, 5.0) for _ in range(len(architectures))]
+                predictions = [random.uniform(0.0, 5.0) for _ in range(len(architectures))]
+                
+            # For surrogate accuracy tracking
+            if self.track_surrogate_accuracy:
+                # Store predictions for later accuracy evaluation
+                # But only store random predictions if we have no better option
+                if not hasattr(self, '_random_predictions_warned'):
+                    logger.warning("Storing random predictions for surrogate accuracy tracking (first time only warning)")
+                    self._random_predictions_warned = True
+                self.surrogate_predictions.extend(predictions)
+                
+            return predictions
         
         # Make predictions in batches
         predictions = []
@@ -933,6 +1037,11 @@ class PNASSearch:
             
             predictions.extend(batch_predictions)
         
+        # For surrogate accuracy tracking
+        if self.track_surrogate_accuracy:
+            # Store predictions for later accuracy evaluation
+            self.surrogate_predictions.extend(predictions)
+            
         return predictions
         
     def _get_shared_weights_predictions(self, architectures):
@@ -1203,6 +1312,21 @@ class PNASSearch:
             float: Best fitness value
             dict: Search history
         """
+        # Start timing the entire search process
+        search_start_time = time.time()
+        
+        # Initialize performance tracking
+        self.performance_tracking = {
+            'total_start_time': search_start_time,
+            'complexity_level_times': [],
+            'evaluation_times': [],
+            'surrogate_training_times': [],
+            'expansion_times': [],
+            'prediction_times': [],
+            'total_architectures_evaluated': 0,
+            'total_architectures_predicted': 0
+        }
+        
         logger.info("Starting PNAS search")
         
         # Handle resuming from checkpoint
@@ -1538,5 +1662,160 @@ class PNASSearch:
             except Exception as e:
                 logger.error(f"Error saving controller model: {e}")
         
+        # Record total search time
+        total_search_time = time.time() - self.performance_tracking['total_start_time']
+        self.performance_tracking['total_search_time'] = total_search_time
+        
+        # Add GPU time statistics if available
+        if hasattr(self, 'gpu_time_stats'):
+            self.performance_tracking['gpu_time_stats'] = self.gpu_time_stats
+            logger.info(f"Total GPU time: {self.gpu_time_stats['total_gpu_time_ms']/1000:.2f} seconds")
+            logger.info(f"Average GPU time per architecture: {self.gpu_time_stats['avg_gpu_time_ms']/1000:.2f} seconds")
+        
+        # Add performance metrics to history
+        self.history['performance_tracking'] = self.performance_tracking
+        
+        # Log final performance statistics
+        logger.info(f"Search completed in {total_search_time:.2f} seconds")
+        logger.info(f"Total architectures evaluated: {self.performance_tracking['total_architectures_evaluated']}")
+        logger.info(f"Total architectures predicted: {self.performance_tracking['total_architectures_predicted']}")
+        
+        if self.use_shared_weights:
+            logger.info(f"Hybrid mode - Importance weight: {self.shared_weights_importance:.2f}")
+            if hasattr(self, 'prediction_stats') and 'hybrid_time' in self.prediction_stats:
+                avg_hybrid_time = sum(self.prediction_stats['hybrid_time']) / len(self.prediction_stats['hybrid_time'])
+                logger.info(f"Average hybrid prediction time: {avg_hybrid_time:.3f}s")
+        
+        # Evaluate surrogate model accuracy at the end of search
+        if self.track_surrogate_accuracy and len(self.surrogate_predictions) > 0 and len(self.actual_performances) > 0:
+            surrogate_accuracy = self._evaluate_surrogate_accuracy()
+            logger.info(f"Final surrogate model accuracy: {surrogate_accuracy:.4f}")
+        
+        logger.info(f"Best architecture achieved {self.best_fitness:.4f} {self.metric}")
         logger.info("PNAS search completed")
         return self.best_architecture, self.best_fitness, self.history
+        
+    def _evaluate_surrogate_accuracy(self):
+        """
+        Evaluate the accuracy of the surrogate model by comparing predictions to actual performances.
+        
+        Returns:
+            float: Accuracy of the surrogate model (R² score or correlation)
+        """
+        if not self.surrogate_predictions or not self.actual_performances:
+            logger.warning("No data available to evaluate surrogate accuracy")
+            return 0.0
+            
+        # Ensure equal length
+        min_len = min(len(self.surrogate_predictions), len(self.actual_performances))
+        surrogate_data = self.surrogate_predictions[-min_len:]
+        actual_data = self.actual_performances[-min_len:]
+        
+        # Calculate correlation
+        try:
+            import numpy as np
+            from scipy.stats import pearsonr, spearmanr
+            
+            # Convert to numpy arrays
+            surrogate_np = np.array(surrogate_data)
+            actual_np = np.array(actual_data)
+            
+            # Calculate Pearson correlation
+            pearson_corr, _ = pearsonr(surrogate_np, actual_np)
+            
+            # Calculate Spearman rank correlation (more robust to outliers)
+            spearman_corr, _ = spearmanr(surrogate_np, actual_np)
+            
+            # Calculate mean absolute error
+            mae = np.mean(np.abs(surrogate_np - actual_np))
+            
+            # Store in history
+            accuracy_metrics = {
+                'pearson': float(pearson_corr),
+                'spearman': float(spearman_corr),
+                'mae': float(mae),
+                'sample_size': min_len
+            }
+            self.history['surrogate_accuracy'].append(accuracy_metrics)
+            
+            # Save prediction pairs for visualization
+            self.history['surrogate_predictions_history'].append(surrogate_data)
+            self.history['actual_performances_history'].append(actual_data)
+            
+            # Add importance weight to history if using hybrid mode
+            if self.use_shared_weights:
+                self.history['importance_weight_history'].append(self.shared_weights_importance)
+                
+                # Adjust importance weight if dynamic mode is enabled
+                if self.dynamic_importance_weight:
+                    self._adjust_importance_weight(pearson_corr, spearman_corr)
+            
+            logger.info(f"Surrogate model accuracy: Pearson={pearson_corr:.4f}, Spearman={spearman_corr:.4f}, MAE={mae:.4f}, n={min_len}")
+            
+            # Return the Spearman correlation as the overall accuracy metric
+            return (spearman_corr + 1) / 2  # Normalize to 0-1 range
+            
+        except Exception as e:
+            logger.error(f"Error calculating surrogate accuracy: {e}")
+            return 0.0
+            
+    def _adjust_importance_weight(self, pearson_corr, spearman_corr):
+        """
+        Dynamically adjust the importance weight based on surrogate model accuracy.
+        
+        The core idea is:
+        - If surrogate model is accurate (high correlation), reduce importance of shared weights
+        - If surrogate model is inaccurate (low correlation), increase importance of shared weights
+        
+        Args:
+            pearson_corr: Pearson correlation between surrogate predictions and actual performance
+            spearman_corr: Spearman correlation between surrogate predictions and actual performance
+        """
+        # Use the average of both correlation types for more stable adjustments
+        avg_correlation = (pearson_corr + spearman_corr) / 2
+        
+        # Record previous value for logging
+        previous_weight = self.shared_weights_importance
+        
+        # Dynamic adjustment logic - correlation ranges from -1 to 1
+        # Normalize to 0-1 range for easier calculations
+        normalized_correlation = (avg_correlation + 1) / 2
+        
+        # If correlation is high (>0.7 normalized or >0.4 raw), reduce shared weights importance
+        # If correlation is low (<0.5 normalized or <0.0 raw), increase shared weights importance
+        if normalized_correlation > 0.7:  # Strong correlation
+            # Surrogate model is accurate, reduce reliance on shared weights
+            new_weight = max(0.1, self.shared_weights_importance - 0.1)
+            adjustment_reason = "decrease (surrogate model is accurate)"
+        elif normalized_correlation < 0.5:  # Weak correlation
+            # Surrogate model is less accurate, increase reliance on shared weights
+            new_weight = min(0.9, self.shared_weights_importance + 0.1)
+            adjustment_reason = "increase (surrogate model is less accurate)"
+        else:  # Moderate correlation
+            # Minor adjustment to fine-tune
+            if normalized_correlation > 0.6:
+                new_weight = max(0.3, self.shared_weights_importance - 0.05)
+                adjustment_reason = "slight decrease (good surrogate accuracy)"
+            elif normalized_correlation < 0.6:
+                new_weight = min(0.7, self.shared_weights_importance + 0.05)
+                adjustment_reason = "slight increase (moderate surrogate accuracy)"
+            else:
+                new_weight = self.shared_weights_importance  # Keep the same
+                adjustment_reason = "no change (balanced accuracy)"
+        
+        # Update the importance weight
+        self.shared_weights_importance = new_weight
+        
+        # Log the adjustment
+        adjustment = {
+            'previous_weight': previous_weight,
+            'new_weight': new_weight,
+            'avg_correlation': avg_correlation,
+            'reason': adjustment_reason
+        }
+        
+        self.history['importance_weight_adjustments'].append(adjustment)
+        
+        logger.info(f"Adjusted importance weight: {previous_weight:.2f} → {new_weight:.2f} ({adjustment_reason})")
+        
+        return new_weight

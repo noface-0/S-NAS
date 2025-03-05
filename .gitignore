@@ -2,6 +2,10 @@
 output/
 data/
 notes.txt
+*.sty
+*.pdf
+*.tex
+*.bib
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
