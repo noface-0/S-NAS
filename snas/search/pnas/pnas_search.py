@@ -543,6 +543,8 @@ class PNASSearch:
             surrogate_predictions = self._get_surrogate_predictions(architectures)
             shared_weights_predictions = self._get_shared_weights_predictions(architectures)
             
+            logger.info(f"Surrogate predictions size: {len(surrogate_predictions)}, Shared weights predictions size: {len(shared_weights_predictions)}")
+            
             # Make sure both prediction lists have the same length
             if len(surrogate_predictions) != len(shared_weights_predictions):
                 logger.warning(f"Prediction length mismatch: surrogate={len(surrogate_predictions)}, shared_weights={len(shared_weights_predictions)}")
@@ -560,9 +562,26 @@ class PNASSearch:
                 
                 # Convert to float values if possible
                 if isinstance(surrogate_pred, torch.Tensor):
-                    surrogate_pred = surrogate_pred.item()
+                    try:
+                        # Handle tensor dimensions properly
+                        if surrogate_pred.dim() > 0:
+                            surrogate_pred = surrogate_pred.item()
+                        else:
+                            surrogate_pred = float(surrogate_pred)
+                    except:
+                        # If tensor conversion fails, use a fallback value
+                        surrogate_pred = 0.5
+                
                 if isinstance(shared_pred, torch.Tensor):
-                    shared_pred = shared_pred.item()
+                    try:
+                        # Handle tensor dimensions properly
+                        if shared_pred.dim() > 0:
+                            shared_pred = shared_pred.item()
+                        else:
+                            shared_pred = float(shared_pred)
+                    except:
+                        # If tensor conversion fails, use a fallback value
+                        shared_pred = 0.5
                 
                 # Handle None values
                 if surrogate_pred is None and shared_pred is None:

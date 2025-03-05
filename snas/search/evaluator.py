@@ -35,7 +35,27 @@ class Evaluator:
         """
         self.dataset_registry = dataset_registry
         self.model_builder = model_builder
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Explicitly check and set device
+        if device is None:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        else:
+            self.device = device
+            
+        # Log device information
+        logger.info(f"Evaluator initialized with device: {self.device}")
+        if self.device.startswith('cuda'):
+            # Log GPU information
+            try:
+                if torch.cuda.is_available():
+                    gpu_name = torch.cuda.get_device_name(0)
+                    gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # Convert to GB
+                    logger.info(f"Using GPU: {gpu_name} with {gpu_mem:.2f} GB memory")
+                else:
+                    logger.warning("CUDA device specified but CUDA is not available")
+            except Exception as e:
+                logger.warning(f"Could not get GPU information: {str(e)}")
+        
         self.max_epochs = max_epochs
         self.patience = patience
         self.log_interval = log_interval
@@ -50,6 +70,103 @@ class Evaluator:
         
         # Track model performance with different shared weights
         self.shared_weight_performance = defaultdict(list)
+        
+        # Create a container for weight sharing pool for PNAS+ENAS integration
+        self.weight_sharing_pool = [] if enable_weight_sharing else None
+        
+    def estimate_performance_from_shared_weights(self, architecture, dataset_name, metric):
+        """
+        Estimate the performance of an architecture using the shared weights pool.
+        This method is used by the PNAS+ENAS combined search to get quick estimates.
+        
+        Args:
+            architecture: Architecture to estimate
+            dataset_name: Name of the dataset
+            metric: Metric to use for estimation ('val_acc', 'val_loss', etc.)
+            
+        Returns:
+            float: Estimated performance value or None if no estimate is available
+        """
+        if not self.enable_weight_sharing or not self.weight_sharing_pool:
+            logger.info("Shared weights not available for estimation")
+            return None
+            
+        try:
+            # Get dataset configuration
+            dataset_config = self.dataset_registry.get_dataset_config(dataset_name)
+            
+            # Complete architecture with dataset-specific values
+            complete_architecture = architecture.copy()
+            if 'input_shape' not in complete_architecture:
+                complete_architecture['input_shape'] = dataset_config['input_shape']
+            if 'num_classes' not in complete_architecture:
+                complete_architecture['num_classes'] = dataset_config['num_classes']
+            
+            # Build model
+            model = self.model_builder.build_model(complete_architecture)
+            model = model.to(self.device)
+            
+            # Get validation loader for evaluation
+            _, val_loader, _ = self.dataset_registry.get_dataset(dataset_name)
+            
+            # Evaluate with each set of shared weights and average the results
+            estimates = []
+            
+            # Use at most 5 sets of shared weights for efficiency
+            for weights_info in self.weight_sharing_pool[:5]:
+                if weights_info['network_type'] == complete_architecture.get('network_type', None):
+                    # Load shared weights that match the network type
+                    try:
+                        # Try to load weights - this may fail if architectures are incompatible
+                        model.load_state_dict(weights_info['state_dict'], strict=False)
+                        
+                        # Evaluate the model
+                        model.eval()
+                        val_loss = 0
+                        correct = 0
+                        total = 0
+                        
+                        with torch.no_grad():
+                            for inputs, targets in val_loader:
+                                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                                outputs = model(inputs)
+                                
+                                if isinstance(outputs, tuple):
+                                    outputs = outputs[0]  # Handle models that return multiple outputs
+                                
+                                loss = torch.nn.functional.cross_entropy(outputs, targets)
+                                val_loss += loss.item()
+                                
+                                _, predicted = outputs.max(1)
+                                total += targets.size(0)
+                                correct += predicted.eq(targets).sum().item()
+                        
+                        # Calculate metrics
+                        avg_loss = val_loss / len(val_loader)
+                        accuracy = correct / total
+                        
+                        # Use the appropriate metric
+                        if metric == 'val_acc':
+                            estimates.append(accuracy)
+                        elif metric == 'val_loss':
+                            estimates.append(avg_loss)
+                        else:
+                            # Default to accuracy for other metrics
+                            estimates.append(accuracy)
+                    except Exception as e:
+                        # Skip incompatible weights
+                        logger.debug(f"Couldn't use shared weights for estimation: {str(e)}")
+                        continue
+            
+            # Return the average estimate if we have any
+            if estimates:
+                return sum(estimates) / len(estimates)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error in shared weights estimation: {str(e)}")
+            return None
     
     def evaluate(self, architecture, dataset_name, fast_mode=False) -> Dict[str, Any]:
         """
@@ -654,7 +771,10 @@ class Evaluator:
         pool_entry = {
             'architecture': architecture.copy(),
             'state_dict': copy.deepcopy(model.state_dict()),
-            'performance': performance
+            'performance': performance,
+            'network_type': network_type,  # Add network_type for easier access
+            'val_acc': val_acc,  # Include both metrics for flexibility
+            'val_loss': val_loss
         }
         
         # Add to the pool for this network type
@@ -665,6 +785,30 @@ class Evaluator:
             'val_acc': val_acc,
             'val_loss': val_loss
         })
+        
+        # Update the global weight_sharing_pool for PNAS+ENAS integration
+        if hasattr(self, 'weight_sharing_pool') and self.weight_sharing_pool is not None:
+            # Also add to the weight_sharing_pool for PNAS+ENAS combined search
+            self.weight_sharing_pool.append(pool_entry)
+            
+            # Limit the size of the global pool
+            if len(self.weight_sharing_pool) > self.weight_sharing_max_models:
+                # Sort by performance (higher acc or lower loss is better)
+                if self.monitor == 'val_acc':
+                    # Sort by validation accuracy (higher is better)
+                    self.weight_sharing_pool.sort(
+                        key=lambda x: x['val_acc'], reverse=True
+                    )
+                else:
+                    # Sort by validation loss (lower is better)
+                    self.weight_sharing_pool.sort(
+                        key=lambda x: x['val_loss'], reverse=False
+                    )
+                    
+                # Keep only the top performers
+                self.weight_sharing_pool = self.weight_sharing_pool[:self.weight_sharing_max_models]
+                
+            logger.info(f"Updated global weight sharing pool. Size: {len(self.weight_sharing_pool)}")
         
         # If the pool for this network type is getting too large, trim it
         if len(self.shared_param_pools[network_type]) > self.weight_sharing_max_models:
