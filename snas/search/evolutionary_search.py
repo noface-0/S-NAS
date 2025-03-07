@@ -509,7 +509,8 @@ class EvolutionarySearch:
                     
             # Limit other parameters based on network type
             if architecture['network_type'] == 'cnn':
-                architecture['filters'] = [min(f, 64) for f in architecture['filters']]
+                if 'filters' in architecture:
+                    architecture['filters'] = [min(f, 64) for f in architecture['filters']]
             elif architecture['network_type'] == 'mlp' and 'hidden_units' in architecture:
                 architecture['hidden_units'] = [min(h, 256) for h in architecture['hidden_units']]
         
