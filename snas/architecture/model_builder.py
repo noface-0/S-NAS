@@ -1847,3 +1847,34 @@ class ModelBuilder:
         criterion = self.get_criterion(architecture)
         
         return model, optimizer, criterion
+        
+    def wrap_model_for_distributed(self, model, device, ddp_rank=None, ddp_world_size=None, 
+                                  use_sync_bn=True, gradient_accumulation_steps=1):
+        """
+        Wrap a model for distributed training using DDPModel.
+        
+        Args:
+            model: The base model to wrap
+            device: The device to use
+            ddp_rank: The rank in distributed training
+            ddp_world_size: The total number of processes
+            use_sync_bn: Whether to use synchronized batch normalization
+            gradient_accumulation_steps: Number of steps to accumulate gradients
+            
+        Returns:
+            DDPModel: The wrapped model
+        """
+        # Import here to avoid circular imports
+        from ..utils.job_distributor import DDPModel
+        
+        # Wrap the model with DDPModel
+        wrapped_model = DDPModel(
+            model,
+            device,
+            ddp_rank=ddp_rank,
+            ddp_world_size=ddp_world_size,
+            use_sync_bn=use_sync_bn,
+            gradient_accumulation_steps=gradient_accumulation_steps
+        )
+        
+        return wrapped_model

@@ -433,6 +433,36 @@ class DatasetRegistry:
         logger.info(f"Registered folder dataset '{name}' with {num_classes} classes")
         return config
     
+    def adjust_batch_size(self, dataset_name, scaler_fn, world_size, val_split=0.1):
+        """
+        Get data loaders with batch size adjusted for distributed training.
+        
+        Args:
+            dataset_name: Name of the dataset
+            scaler_fn: Function to scale batch size based on world size
+            world_size: Number of processes in distributed training
+            val_split: Proportion of training data to use for validation
+            
+        Returns:
+            tuple: (train_loader, val_loader, test_loader) with scaled batch size
+        """
+        # Store original batch size
+        original_batch_size = self.batch_size
+        
+        try:
+            # Scale batch size using provided scaling function
+            scaled_batch_size = scaler_fn(self.batch_size, world_size)
+            logger.info(f"Scaling batch size from {original_batch_size} to {scaled_batch_size} for {world_size} processes")
+            
+            # Set new batch size
+            self.batch_size = scaled_batch_size
+            
+            # Get dataset with scaled batch size
+            return self.get_dataset(dataset_name, val_split)
+        finally:
+            # Restore original batch size
+            self.batch_size = original_batch_size
+    
     def get_dataset(self, dataset_name, val_split=0.1):
         """
         Get a dataset with standard preprocessing.

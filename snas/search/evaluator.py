@@ -197,6 +197,26 @@ class Evaluator:
             
             # Get data loaders
             train_loader, val_loader, test_loader = self.dataset_registry.get_dataset(dataset_name)
+            
+            # If using DDP, scale batch size
+            if hasattr(self, 'ddp_world_size') and self.ddp_world_size is not None and self.ddp_world_size > 1:
+                if hasattr(self.dataset_registry, 'adjust_batch_size'):
+                    # If the registry supports batch size adjustment
+                    logger.info(f"Scaling batch size for DDP with world size {self.ddp_world_size}")
+                    
+                    # Scale batch size using the provided or default scaler
+                    if hasattr(self, 'batch_size_scaler') and self.batch_size_scaler is not None:
+                        scaler_fn = self.batch_size_scaler
+                    else:
+                        # Default linear scaling
+                        scaler_fn = lambda base_size, world_size: base_size * world_size
+                        
+                    # Get adjusted data loaders with scaled batch size
+                    train_loader, val_loader, test_loader = self.dataset_registry.adjust_batch_size(
+                        dataset_name, 
+                        scaler_fn, 
+                        self.ddp_world_size
+                    )
         except Exception as e:
             error_msg = f"Failed to prepare dataset for evaluation: {str(e)}"
             logger.error(error_msg)
@@ -341,7 +361,7 @@ class Evaluator:
         return results
     
     def _train_epoch(self, model, train_loader, optimizer, criterion, epoch, fast_mode):
-        """Train for one epoch."""
+        """Train for one epoch with support for mixed precision and gradient accumulation."""
         model.train()
         total_loss = 0
         correct = 0
@@ -350,48 +370,100 @@ class Evaluator:
         # Limit batches in fast mode
         batch_limit = 10 if fast_mode else len(train_loader)
         
+        # Check for DDP and mixed precision settings
+        use_mixed_precision = hasattr(self, 'use_mixed_precision') and self.use_mixed_precision
+        grad_scaler = getattr(self, 'grad_scaler', None) if use_mixed_precision else None
+        gradient_accumulation_steps = getattr(self, 'gradient_accumulation_steps', 1)
+        
+        # Adjust batch size for multi-GPU if needed
+        if hasattr(self, 'ddp_world_size') and self.ddp_world_size is not None and self.ddp_world_size > 1:
+            # Scale the batch limit by world size to maintain same total samples
+            if hasattr(self, 'batch_size_scaler') and self.batch_size_scaler is not None:
+                batch_limit = self.batch_size_scaler(batch_limit, self.ddp_world_size)
+            
+        # Process batches with gradient accumulation
+        optimizer.zero_grad()
+        accumulated_batches = 0
+        
         for batch_idx, (inputs, targets) in enumerate(train_loader):
             if batch_idx >= batch_limit:
                 break
                 
             inputs, targets = inputs.to(self.device), targets.to(self.device)
             
-            # Forward pass
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
+            # Calculate loss with mixed precision if enabled
+            if use_mixed_precision:
+                with torch.cuda.amp.autocast():
+                    outputs = model(inputs)
+                    loss = criterion(outputs, targets)
+                    
+                    # Scale loss for gradient accumulation
+                    if gradient_accumulation_steps > 1:
+                        loss = loss / gradient_accumulation_steps
+            else:
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                
+                # Scale loss for gradient accumulation
+                if gradient_accumulation_steps > 1:
+                    loss = loss / gradient_accumulation_steps
             
             # Check for NaN in loss
             if torch.isnan(loss):
                 logger.warning(f"NaN loss detected in batch {batch_idx}, skipping backward pass")
                 continue
                 
-            # Backward pass and optimize
-            loss.backward()
+            # Backward pass with mixed precision if enabled
+            if use_mixed_precision and grad_scaler is not None:
+                # Uses GradScaler for mixed precision training
+                grad_scaler.scale(loss).backward()
+            else:
+                loss.backward()
             
-            # Gradient value check and clipping to prevent exploding gradients
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-            if torch.isnan(grad_norm):
-                logger.warning(f"NaN gradient detected in batch {batch_idx}, skipping optimizer step")
-                # Zero out gradients with NaN values
-                for param in model.parameters():
-                    if param.grad is not None and torch.isnan(param.grad).any():
-                        param.grad.zero_()
+            # Accumulate gradients
+            accumulated_batches += 1
             
-            optimizer.step()
+            # Only step if we've accumulated enough gradients or it's the last batch
+            if accumulated_batches >= gradient_accumulation_steps or batch_idx + 1 >= batch_limit:
+                # Gradient value check and clipping to prevent exploding gradients
+                if use_mixed_precision and grad_scaler is not None:
+                    # First unscale gradients for proper clipping
+                    grad_scaler.unscale_(optimizer)
+                
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+                if torch.isnan(grad_norm):
+                    logger.warning(f"NaN gradient detected in batch {batch_idx}, skipping optimizer step")
+                    # Zero out gradients with NaN values
+                    for param in model.parameters():
+                        if param.grad is not None and torch.isnan(param.grad).any():
+                            param.grad.zero_()
+                
+                # Step with mixed precision if enabled
+                if use_mixed_precision and grad_scaler is not None:
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                else:
+                    optimizer.step()
+                
+                # Reset for next accumulation
+                optimizer.zero_grad()
+                accumulated_batches = 0
             
-            # Calculate accuracy
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
+            # Calculate accuracy 
+            with torch.no_grad():
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
             
             # Accumulate loss (with NaN check)
-            total_loss += loss.item() if not torch.isnan(loss) else 0
+            total_loss += loss.item() * (gradient_accumulation_steps if gradient_accumulation_steps > 1 else 1) if not torch.isnan(loss) else 0
             
-            # Log batch progress
+            # Log batch progress (normalize by accumulation steps)
             if batch_idx % self.log_interval == 0:
-                logger.debug(f'Epoch: {epoch+1}, Batch: {batch_idx}/{len(train_loader)}, '
-                           f'Loss: {loss.item():.4f}, Acc: {100.*correct/total:.2f}%')
+                logger.debug(f'Epoch: {epoch+1}, Batch: {batch_idx}/{min(batch_limit, len(train_loader))}, '
+                           f'Loss: {loss.item() * (gradient_accumulation_steps if gradient_accumulation_steps > 1 else 1):.4f}, '
+                           f'Acc: {100.*correct/total:.2f}%, '
+                           f'Grad Accum: {accumulated_batches}/{gradient_accumulation_steps}')
         
         # Calculate epoch metrics
         avg_loss = total_loss / min(batch_limit, len(train_loader))
@@ -400,19 +472,27 @@ class Evaluator:
         return avg_loss, avg_acc
     
     def _validate(self, model, data_loader, criterion):
-        """Evaluate model on validation or test data."""
+        """Evaluate model on validation or test data with mixed precision support."""
         model.eval()
         total_loss = 0
         correct = 0
         total = 0
         
+        # Check for mixed precision settings
+        use_mixed_precision = hasattr(self, 'use_mixed_precision') and self.use_mixed_precision
+        
         with torch.no_grad():
             for inputs, targets in data_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 
-                # Forward pass
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
+                # Forward pass with mixed precision if enabled
+                if use_mixed_precision:
+                    with torch.cuda.amp.autocast():
+                        outputs = model(inputs)
+                        loss = criterion(outputs, targets)
+                else:
+                    outputs = model(inputs)
+                    loss = criterion(outputs, targets)
                 
                 # Check for NaN in loss
                 if torch.isnan(loss):
@@ -435,6 +515,27 @@ class Evaluator:
         else:
             avg_loss = total_loss / len(data_loader)
             avg_acc = correct / total
+        
+        # If using DDP, synchronize metrics across processes
+        if hasattr(self, 'is_ddp') and self.is_ddp and torch.distributed.is_initialized():
+            # All-reduce for loss and accuracy
+            world_size = torch.distributed.get_world_size()
+            
+            # Average loss across all processes
+            loss_tensor = torch.tensor([avg_loss], device=self.device)
+            torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
+            avg_loss = loss_tensor.item() / world_size
+            
+            # For accuracy, need to synchronize both correct and total
+            correct_tensor = torch.tensor([correct], device=self.device)
+            total_tensor = torch.tensor([total], device=self.device)
+            
+            torch.distributed.all_reduce(correct_tensor, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(total_tensor, op=torch.distributed.ReduceOp.SUM)
+            
+            # Recalculate accuracy with global correct/total
+            if total_tensor.item() > 0:
+                avg_acc = correct_tensor.item() / total_tensor.item()
         
         return avg_loss, avg_acc
     
@@ -471,6 +572,8 @@ class Evaluator:
         This implements the key idea from the ENAS paper (Pham et al., 2018) where
         parameters are shared between different architectures to avoid training from scratch.
         
+        Enhanced with DDP and mixed precision support.
+        
         Args:
             architecture: Architecture specification dictionary
             
@@ -480,7 +583,7 @@ class Evaluator:
         network_type = architecture.get('network_type', 'cnn')
         
         # First build the model normally to get the structure
-        model, optimizer, criterion = self.model_builder.build_training_components(architecture)
+        base_model, optimizer, criterion = self.model_builder.build_training_components(architecture)
         
         # Flag to track if we used shared weights
         used_shared_weights = False
@@ -489,11 +592,11 @@ class Evaluator:
         if network_type in self.shared_param_pools and self.shared_param_pools[network_type]:
             try:
                 # Try to find the best matching weights from our pool
-                compatible_weights = self._find_compatible_weights(model, architecture, network_type)
+                compatible_weights = self._find_compatible_weights(base_model, architecture, network_type)
                 
                 if compatible_weights:
                     # Load the compatible weights
-                    model, success = self._load_compatible_weights(model, compatible_weights)
+                    base_model, success = self._load_compatible_weights(base_model, compatible_weights)
                     
                     if success:
                         used_shared_weights = True
@@ -505,16 +608,36 @@ class Evaluator:
                         lr = architecture.get('learning_rate', 0.001)
                         
                         if optimizer_type == 'sgd':
-                            optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+                            optimizer = torch.optim.SGD(base_model.parameters(), lr=lr, momentum=0.9)
                         elif optimizer_type == 'adamw':
-                            optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+                            optimizer = torch.optim.AdamW(base_model.parameters(), lr=lr)
                         else:  # default to adam
-                            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+                            optimizer = torch.optim.Adam(base_model.parameters(), lr=lr)
             except Exception as e:
                 # If any errors occur during weight sharing, log and continue without shared weights
                 logger.warning(f"Error when trying to use shared weights: {str(e)}")
                 # Rebuild the model from scratch
-                model, optimizer, criterion = self.model_builder.build_training_components(architecture)
+                base_model, optimizer, criterion = self.model_builder.build_training_components(architecture)
+        
+        # Check if we should wrap the model with DDP
+        is_ddp = hasattr(self, 'is_ddp') and self.is_ddp
+        ddp_rank = getattr(self, 'ddp_rank', None)
+        ddp_world_size = getattr(self, 'ddp_world_size', None)
+        use_sync_bn = getattr(self, 'use_sync_bn', True)
+        gradient_accumulation_steps = getattr(self, 'gradient_accumulation_steps', 1)
+        
+        # Import DDPModel here to avoid circular imports
+        from ..utils.job_distributor import DDPModel
+        
+        # Wrap with DDPModel that handles DDP and mixed precision
+        model = DDPModel(
+            base_model, 
+            self.device, 
+            ddp_rank=ddp_rank,
+            ddp_world_size=ddp_world_size, 
+            use_sync_bn=use_sync_bn,
+            gradient_accumulation_steps=gradient_accumulation_steps
+        )
         
         return model, optimizer, criterion, used_shared_weights
     
@@ -779,15 +902,36 @@ class Evaluator:
             val_acc: Validation accuracy
             val_loss: Validation loss
         """
+        # Check if we should be updating the shared parameter pool
+        # In DDP mode, only rank 0 updates to prevent duplication
+        is_ddp = hasattr(self, 'is_ddp') and self.is_ddp
+        ddp_rank = getattr(self, 'ddp_rank', None)
+        
+        if is_ddp and ddp_rank is not None and ddp_rank != 0:
+            # For non-rank-0 processes, don't update the parameter pool
+            logger.debug(f"DDP process rank {ddp_rank} skipping weight sharing pool update")
+            return
+        
         network_type = architecture.get('network_type', 'cnn')
         
         # Use the appropriate performance metric based on what we're monitoring
         performance = val_acc if self.monitor == 'val_acc' else val_loss
         
+        # Get state dict, handling wrapped models (DDP, DDPModel, etc.)
+        if hasattr(model, 'get_base_model'):
+            # This is our DDPModel wrapper
+            state_dict = model.state_dict()
+        elif hasattr(model, 'module'):
+            # This is a standard DDP-wrapped model
+            state_dict = model.module.state_dict()
+        else:
+            # Regular model
+            state_dict = model.state_dict()
+        
         # Create an entry for the parameter pool
         pool_entry = {
             'architecture': architecture.copy(),
-            'state_dict': copy.deepcopy(model.state_dict()),
+            'state_dict': copy.deepcopy(state_dict),
             'performance': performance,
             'network_type': network_type,  # Add network_type for easier access
             'val_acc': val_acc,  # Include both metrics for flexibility
